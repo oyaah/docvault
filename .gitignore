@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.env
+data/
+*.db
+*.lance/
+.ruff_cache/
+.pytest_cache/
+grafana-data/

@@ -1,0 +1,77 @@
+[
+  {
+    "question": "How many PTO days do I get after 3 years?",
+    "expected_answer": "20 days",
+    "expected_sections": ["Benefits > Paid Time Off > PTO Accrual"]
+  },
+  {
+    "question": "What is the parental leave policy for primary caregivers?",
+    "expected_answer": "16 weeks",
+    "expected_sections": ["Benefits > Paid Time Off > Parental Leave"]
+  },
+  {
+    "question": "What is the 401k match?",
+    "expected_answer": "4%",
+    "expected_sections": ["Benefits > Health Insurance > 401(k)"]
+  },
+  {
+    "question": "What are the core work hours?",
+    "expected_answer": "10am-3pm",
+    "expected_sections": ["Remote Work Policy > Work Hours"]
+  },
+  {
+    "question": "How much is the home office stipend?",
+    "expected_answer": "$500",
+    "expected_sections": ["Remote Work Policy > Equipment"]
+  },
+  {
+    "question": "What is the password policy?",
+    "expected_answer": "16 characters",
+    "expected_sections": ["Access Control > Authentication"]
+  },
+  {
+    "question": "How quickly must security incidents be reported?",
+    "expected_answer": "1 hour",
+    "expected_sections": ["Incident Response > Reporting"]
+  },
+  {
+    "question": "What is the severance policy?",
+    "expected_answer": "2 weeks per year",
+    "expected_sections": ["Termination > Severance"]
+  },
+  {
+    "question": "What is the travel meal allowance?",
+    "expected_answer": "$75/day",
+    "expected_sections": ["Expenses > Travel"]
+  },
+  {
+    "question": "What MFA methods are supported?",
+    "expected_answer": "hardware security keys",
+    "expected_sections": ["Access Control > Authentication"]
+  },
+  {
+    "question": "What is the professional development budget?",
+    "expected_answer": "$2,000",
+    "expected_sections": ["Expenses > Professional Development"]
+  },
+  {
+    "question": "What are the data classification levels?",
+    "expected_answer": "Public, Internal, Confidential, Restricted",
+    "expected_sections": ["Data Classification > Levels"]
+  },
+  {
+    "question": "Can I use personal devices for work?",
+    "expected_answer": "not be used to access Confidential or Restricted",
+    "expected_sections": ["Device Security > Personal Devices (BYOD)"]
+  },
+  {
+    "question": "What is the response time for a P1 security incident?",
+    "expected_answer": "15 minutes",
+    "expected_sections": ["Incident Response > Severity Levels"]
+  },
+  {
+    "question": "How long is the probation period?",
+    "expected_answer": "90-day",
+    "expected_sections": ["Remote Work Policy > Eligibility"]
+  }
+]
