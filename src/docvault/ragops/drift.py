@@ -1,6 +1,5 @@
-"""Drift detection — embedding distribution, retrieval quality, query topic clustering."""
+"""Drift detection — embedding distribution, retrieval quality, semantic topic clustering."""
 
-import json
 import time
 import logging
 from collections import Counter
@@ -17,12 +16,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DriftReport:
-    embedding_drift: float | None  # cosine sim shift from baseline
-    retrieval_quality_trend: float | None  # 7-day avg reranker score change
+    embedding_drift: float | None
+    retrieval_quality_trend: float | None
     avg_confidence: float | None
     hallucination_rate: float | None
     query_volume_7d: int
-    query_topics: list[dict] = field(default_factory=list)  # [{topic, count, example}]
+    query_topics: list[dict] = field(default_factory=list)
     timestamp: str = ""
 
 
@@ -30,21 +29,15 @@ def compute_embedding_drift(
     new_embeddings: np.ndarray,
     baseline_path: Path | None = None,
 ) -> float | None:
-    """Compare new embedding distribution against saved baseline.
-
-    Returns magnitude of mean-vector shift (0 = no drift, higher = more drift).
-    """
     bpath = baseline_path or (settings.data_dir / "embedding_baseline.npy")
 
     if not bpath.exists():
-        # Save current as baseline
         np.save(str(bpath), np.mean(new_embeddings, axis=0))
         return None
 
     baseline_mean = np.load(str(bpath))
     new_mean = np.mean(new_embeddings, axis=0)
 
-    # Handle dimension mismatch (model changed)
     if baseline_mean.shape != new_mean.shape:
         np.save(str(bpath), new_mean)
         logger.warning("Embedding dimension changed — reset baseline")
@@ -56,13 +49,12 @@ def compute_embedding_drift(
     drift = 1.0 - float(cos_sim)
 
     if drift > settings.embedding_drift_threshold:
-        logger.warning(f"Embedding drift detected: {drift:.6f} (threshold: {settings.embedding_drift_threshold})")
+        logger.warning(f"Embedding drift detected: {drift:.6f}")
 
     return round(drift, 6)
 
 
 def compute_retrieval_quality_trend(days: int = 7) -> float | None:
-    """Compute average reranker top score over last N days from traces."""
     traces = load_traces(limit=1000)
     if not traces:
         return None
@@ -83,7 +75,6 @@ def compute_retrieval_quality_trend(days: int = 7) -> float | None:
 
 
 def compute_hallucination_rate(days: int = 7) -> float | None:
-    """Compute rolling hallucination rate from traces."""
     traces = load_traces(limit=1000)
     if not traces:
         return None
@@ -105,10 +96,13 @@ def compute_hallucination_rate(days: int = 7) -> float | None:
 
 
 def compute_query_topics(days: int = 7, max_topics: int = 10) -> list[dict]:
-    """Cluster recent queries into topic groups using keyword extraction.
+    """Cluster recent queries semantically using embedding cosine similarity.
 
-    Uses TF-based keyword extraction (no extra ML models) to identify
-    recurring query themes. Detects new topic emergence for coverage gaps.
+    Groups queries into topic clusters by:
+    1. Embedding all queries
+    2. Greedy clustering: assign each query to nearest existing cluster
+       or create new cluster if similarity < threshold
+    3. Return clusters with representative example and count
     """
     traces = load_traces(limit=1000)
     if not traces:
@@ -116,7 +110,6 @@ def compute_query_topics(days: int = 7, max_topics: int = 10) -> list[dict]:
 
     cutoff = time.time() - (days * 86400)
     queries = []
-
     for trace in traces:
         trace_time = _parse_time(trace.get("timestamp", ""))
         if trace_time and trace_time >= cutoff:
@@ -124,60 +117,65 @@ def compute_query_topics(days: int = 7, max_topics: int = 10) -> list[dict]:
             if q:
                 queries.append(q)
 
-    if not queries:
+    if len(queries) < 2:
         return []
 
-    # Extract keywords from queries
-    stop_words = {
-        "what", "is", "the", "how", "do", "does", "can", "i", "my", "a", "an",
-        "for", "to", "in", "of", "and", "or", "are", "we", "our", "get", "about",
-        "much", "many", "long", "when", "where", "who", "which", "that", "this",
-        "with", "have", "has", "it", "be", "on", "at", "by", "if", "me", "there",
-    }
+    # Embed all queries
+    try:
+        from docvault.ingest.embedder import embed_texts
+        embeddings = embed_texts(queries)
+    except Exception as e:
+        logger.warning(f"Failed to embed queries for topic clustering: {e}")
+        return _keyword_fallback(queries, max_topics)
 
-    # Build keyword frequency
-    keyword_freq: Counter = Counter()
-    keyword_queries: dict[str, list[str]] = {}
+    # Greedy clustering with cosine similarity
+    similarity_threshold = 0.75
+    clusters: list[dict] = []  # {centroid: np.array, queries: [str], indices: [int]}
 
-    for q in queries:
-        words = [w.lower().strip("?.,!") for w in q.split()]
-        keywords = [w for w in words if w not in stop_words and len(w) > 2]
-        for kw in keywords:
-            keyword_freq[kw] += 1
-            if kw not in keyword_queries:
-                keyword_queries[kw] = []
-            keyword_queries[kw].append(q)
+    for i, emb in enumerate(embeddings):
+        best_cluster = None
+        best_sim = -1.0
 
-    # Group queries by dominant keyword into topics
+        for cluster in clusters:
+            sim = float(np.dot(emb, cluster["centroid"]) / (
+                np.linalg.norm(emb) * np.linalg.norm(cluster["centroid"]) + 1e-8
+            ))
+            if sim > best_sim:
+                best_sim = sim
+                best_cluster = cluster
+
+        if best_cluster and best_sim >= similarity_threshold:
+            best_cluster["queries"].append(queries[i])
+            best_cluster["indices"].append(i)
+            # Update centroid (running mean)
+            n = len(best_cluster["indices"])
+            best_cluster["centroid"] = (
+                best_cluster["centroid"] * (n - 1) + emb
+            ) / n
+        else:
+            clusters.append({
+                "centroid": emb.copy(),
+                "queries": [queries[i]],
+                "indices": [i],
+            })
+
+    # Sort by cluster size, return top N
+    clusters.sort(key=lambda c: len(c["queries"]), reverse=True)
+
     topics = []
-    assigned_queries: set[str] = set()
-
-    for keyword, count in keyword_freq.most_common(max_topics * 2):
-        if count < 2:
-            break
-
-        # Find unassigned queries matching this keyword
-        matching = [q for q in keyword_queries[keyword] if q not in assigned_queries]
-        if not matching:
+    for cluster in clusters[:max_topics]:
+        if len(cluster["queries"]) < 1:
             continue
-
-        for q in matching:
-            assigned_queries.add(q)
-
         topics.append({
-            "topic": keyword,
-            "count": len(matching),
-            "example": matching[0],
-            "total_mentions": count,
+            "topic": _extract_topic_label(cluster["queries"]),
+            "count": len(cluster["queries"]),
+            "example": cluster["queries"][0],
         })
 
-        if len(topics) >= max_topics:
-            break
-
-    # Detect new topics (appeared only in last 24h)
+    # Detect new topics (only in last 24h, not in older traces)
     recent_cutoff = time.time() - 86400
-    recent_queries = []
-    older_queries = []
+    recent_queries = set()
+    older_queries = set()
 
     for trace in traces:
         trace_time = _parse_time(trace.get("timestamp", ""))
@@ -187,36 +185,80 @@ def compute_query_topics(days: int = 7, max_topics: int = 10) -> list[dict]:
         if not q:
             continue
         if trace_time >= recent_cutoff:
-            recent_queries.append(q)
+            recent_queries.add(q)
         else:
-            older_queries.append(q)
+            older_queries.add(q)
 
     if recent_queries and older_queries:
-        recent_keywords = set()
-        for q in recent_queries:
-            words = [w.lower().strip("?.,!") for w in q.split()]
-            recent_keywords.update(w for w in words if w not in stop_words and len(w) > 2)
+        # Find queries in recent that don't cluster with any older query
+        try:
+            recent_embs = embed_texts(list(recent_queries))
+            older_embs = embed_texts(list(older_queries))
 
-        older_keywords = set()
-        for q in older_queries:
-            words = [w.lower().strip("?.,!") for w in q.split()]
-            older_keywords.update(w for w in words if w not in stop_words and len(w) > 2)
+            # For each recent query, check max similarity to any older query
+            for i, r_emb in enumerate(recent_embs):
+                sims = np.dot(older_embs, r_emb) / (
+                    np.linalg.norm(older_embs, axis=1) * np.linalg.norm(r_emb) + 1e-8
+                )
+                if np.max(sims) < 0.6:
+                    topics.append({
+                        "topic": list(recent_queries)[i],
+                        "count": 1,
+                        "example": list(recent_queries)[i],
+                        "is_new": True,
+                    })
+        except Exception:
+            pass
 
-        new_keywords = recent_keywords - older_keywords
-        if new_keywords:
-            for kw in list(new_keywords)[:3]:
-                topics.append({
-                    "topic": kw,
-                    "count": 1,
-                    "example": next((q for q in recent_queries if kw in q.lower()), ""),
-                    "is_new": True,
-                })
+    return topics
+
+
+def _extract_topic_label(queries: list[str]) -> str:
+    """Extract a representative label from a cluster of queries."""
+    # Use the most common non-stop words across all queries
+    stop_words = {
+        "what", "is", "the", "how", "do", "does", "can", "i", "my", "a", "an",
+        "for", "to", "in", "of", "and", "or", "are", "we", "our", "get", "about",
+        "much", "many", "long", "when", "where", "who", "which", "that", "this",
+        "with", "have", "has", "it", "be", "on", "at", "by", "if", "me", "there",
+    }
+    words: Counter = Counter()
+    for q in queries:
+        for w in q.lower().split():
+            w = w.strip("?.,!")
+            if w not in stop_words and len(w) > 2:
+                words[w] += 1
+
+    top = words.most_common(3)
+    return " ".join(w for w, _ in top) if top else queries[0][:50]
+
+
+def _keyword_fallback(queries: list[str], max_topics: int) -> list[dict]:
+    """Fallback keyword-based clustering when embeddings unavailable."""
+    stop_words = {
+        "what", "is", "the", "how", "do", "does", "can", "i", "my", "a", "an",
+        "for", "to", "in", "of", "and", "or", "are", "we", "our", "get", "about",
+    }
+    keyword_freq: Counter = Counter()
+    keyword_queries: dict[str, list[str]] = {}
+
+    for q in queries:
+        for w in q.lower().split():
+            w = w.strip("?.,!")
+            if w not in stop_words and len(w) > 2:
+                keyword_freq[w] += 1
+                keyword_queries.setdefault(w, []).append(q)
+
+    topics = []
+    for keyword, count in keyword_freq.most_common(max_topics):
+        if count < 2:
+            break
+        topics.append({"topic": keyword, "count": count, "example": keyword_queries[keyword][0]})
 
     return topics
 
 
 def generate_drift_report() -> DriftReport:
-    """Generate a comprehensive drift report."""
     traces = load_traces(limit=1000)
     cutoff = time.time() - (7 * 86400)
 
@@ -225,7 +267,6 @@ def generate_drift_report() -> DriftReport:
         if _parse_time(t.get("timestamp", "")) and _parse_time(t["timestamp"]) >= cutoff
     )
 
-    # Compute average confidence
     confidences = []
     for t in traces:
         trace_time = _parse_time(t.get("timestamp", ""))
@@ -237,7 +278,7 @@ def generate_drift_report() -> DriftReport:
     avg_conf = round(float(np.mean(confidences)), 4) if confidences else None
 
     return DriftReport(
-        embedding_drift=None,  # computed separately during ingest
+        embedding_drift=None,
         retrieval_quality_trend=compute_retrieval_quality_trend(),
         avg_confidence=avg_conf,
         hallucination_rate=compute_hallucination_rate(),

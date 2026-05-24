@@ -39,6 +39,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# API key auth (disabled if no keys configured)
+from docvault.auth import APIKeyMiddleware
+app.add_middleware(APIKeyMiddleware)
+
 
 # ── Request/Response Models ──────────────────────────────
 

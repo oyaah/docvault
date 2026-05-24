@@ -1,11 +1,11 @@
-"""Retrieval cache — Redis-backed with in-memory LRU fallback."""
+"""Retrieval cache — backend interface with Redis and in-memory implementations."""
 
 import json
 import time
 import hashlib
 import logging
+from abc import ABC, abstractmethod
 from collections import OrderedDict
-from dataclasses import dataclass
 
 import numpy as np
 
@@ -16,88 +16,131 @@ logger = logging.getLogger(__name__)
 CACHE_PREFIX = "docvault:cache:"
 
 
-def _get_redis():
-    try:
-        import redis
-        r = redis.from_url(settings.redis_url, decode_responses=True)
-        r.ping()
-        return r
-    except Exception:
-        return None
+class _JSONEncoder(json.JSONEncoder):
+    """Handles numpy types and other non-standard JSON objects."""
+
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, bytes):
+            return obj.decode("utf-8", errors="replace")
+        if hasattr(obj, "__dict__"):
+            return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+        return super().default(obj)
 
 
-class RetrievalCache:
-    """Redis-backed retrieval cache. Falls back to in-memory LRU if Redis unavailable."""
+def _serialize(results: list[dict]) -> str:
+    return json.dumps(results, cls=_JSONEncoder)
 
-    def __init__(self, max_size: int = 256):
-        self._redis = _get_redis()
-        # In-memory fallback
-        self._mem_cache: OrderedDict[str, dict] = OrderedDict()
-        self._max_size = max_size
 
-        if self._redis:
-            logger.info("Retrieval cache: Redis connected")
-        else:
-            logger.warning("Retrieval cache: Redis unavailable, using in-memory LRU")
+def _make_key(query_embedding: np.ndarray, top_k: int) -> str:
+    quantized = (query_embedding * 1000).astype(np.int16).tobytes()
+    return hashlib.md5(quantized + str(top_k).encode()).hexdigest()
 
-    def _make_key(self, query_embedding: np.ndarray, top_k: int) -> str:
-        quantized = (query_embedding * 1000).astype(np.int16).tobytes()
-        h = hashlib.md5(quantized + str(top_k).encode()).hexdigest()
-        return h
 
-    def get(self, query_embedding: np.ndarray, top_k: int) -> list[dict] | None:
-        key = self._make_key(query_embedding, top_k)
+# ── Interface ────────────────────────────────────────────
 
-        if self._redis:
-            raw = self._redis.get(CACHE_PREFIX + key)
-            if raw is None:
-                return None
-            return json.loads(raw)
-        else:
-            entry = self._mem_cache.get(key)
-            if entry is None:
-                return None
-            if (time.time() - entry["timestamp"]) > settings.cache_ttl_seconds:
-                del self._mem_cache[key]
-                return None
-            self._mem_cache.move_to_end(key)
-            return entry["results"]
+class CacheBackend(ABC):
+    @abstractmethod
+    def get(self, key: str) -> list[dict] | None: ...
 
-    def put(self, query_embedding: np.ndarray, top_k: int, results: list[dict]):
-        key = self._make_key(query_embedding, top_k)
+    @abstractmethod
+    def put(self, key: str, results: list[dict], ttl: int) -> None: ...
 
-        # Serialize results — strip non-serializable fields
-        serializable = []
-        for r in results:
-            clean = {}
-            for k, v in r.items():
-                if isinstance(v, (str, int, float, bool, list, dict, type(None))):
-                    clean[k] = v
-            serializable.append(clean)
+    @abstractmethod
+    def invalidate(self) -> None: ...
 
-        if self._redis:
-            self._redis.setex(
-                CACHE_PREFIX + key,
-                settings.cache_ttl_seconds,
-                json.dumps(serializable),
-            )
-        else:
-            self._mem_cache[key] = {"results": serializable, "timestamp": time.time()}
-            self._mem_cache.move_to_end(key)
-            while len(self._mem_cache) > self._max_size:
-                self._mem_cache.popitem(last=False)
+    @abstractmethod
+    def stats(self) -> dict: ...
 
-    def invalidate(self):
-        """Clear entire cache."""
-        if self._redis:
-            keys = self._redis.keys(CACHE_PREFIX + "*")
-            if keys:
-                self._redis.delete(*keys)
-        else:
-            self._mem_cache.clear()
+
+# ── Redis Backend ────────────────────────────────────────
+
+class RedisCacheBackend(CacheBackend):
+    def __init__(self, redis_client):
+        self._r = redis_client
+
+    def get(self, key: str) -> list[dict] | None:
+        raw = self._r.get(CACHE_PREFIX + key)
+        return json.loads(raw) if raw else None
+
+    def put(self, key: str, results: list[dict], ttl: int) -> None:
+        self._r.setex(CACHE_PREFIX + key, ttl, _serialize(results))
+
+    def invalidate(self) -> None:
+        keys = self._r.keys(CACHE_PREFIX + "*")
+        if keys:
+            self._r.delete(*keys)
 
     def stats(self) -> dict:
-        if self._redis:
-            keys = self._redis.keys(CACHE_PREFIX + "*")
-            return {"backend": "redis", "size": len(keys)}
-        return {"backend": "memory", "size": len(self._mem_cache), "max_size": self._max_size}
+        return {"backend": "redis", "size": len(self._r.keys(CACHE_PREFIX + "*"))}
+
+
+# ── In-Memory Backend ────────────────────────────────────
+
+class MemoryCacheBackend(CacheBackend):
+    def __init__(self, max_size: int = 256):
+        self._cache: OrderedDict[str, dict] = OrderedDict()
+        self._max_size = max_size
+
+    def get(self, key: str) -> list[dict] | None:
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+        if (time.time() - entry["timestamp"]) > settings.cache_ttl_seconds:
+            del self._cache[key]
+            return None
+        self._cache.move_to_end(key)
+        return entry["results"]
+
+    def put(self, key: str, results: list[dict], ttl: int) -> None:
+        # Re-serialize through JSON to strip non-serializable types consistently
+        clean = json.loads(_serialize(results))
+        self._cache[key] = {"results": clean, "timestamp": time.time()}
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._max_size:
+            self._cache.popitem(last=False)
+
+    def invalidate(self) -> None:
+        self._cache.clear()
+
+    def stats(self) -> dict:
+        return {"backend": "memory", "size": len(self._cache), "max_size": self._max_size}
+
+
+# ── Public API ───────────────────────────────────────────
+
+class RetrievalCache:
+    """Retrieval cache with automatic backend selection."""
+
+    def __init__(self, max_size: int = 256):
+        self._backend = self._select_backend(max_size)
+        logger.info(f"Retrieval cache: {self._backend.stats()['backend']}")
+
+    @staticmethod
+    def _select_backend(max_size: int) -> CacheBackend:
+        try:
+            import redis
+            r = redis.from_url(settings.redis_url, decode_responses=True)
+            r.ping()
+            return RedisCacheBackend(r)
+        except Exception:
+            return MemoryCacheBackend(max_size)
+
+    def get(self, query_embedding: np.ndarray, top_k: int) -> list[dict] | None:
+        return self._backend.get(_make_key(query_embedding, top_k))
+
+    def put(self, query_embedding: np.ndarray, top_k: int, results: list[dict]):
+        self._backend.put(_make_key(query_embedding, top_k), results, settings.cache_ttl_seconds)
+
+    def invalidate(self):
+        self._backend.invalidate()
+
+    def stats(self) -> dict:
+        return self._backend.stats()
