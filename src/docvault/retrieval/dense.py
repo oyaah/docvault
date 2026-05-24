@@ -1,97 +1,119 @@
-"""Dense retrieval via LanceDB ANN search."""
+"""Dense retrieval via Pinecone managed vector DB.
 
-import lancedb
-import pyarrow as pa
+Replaces local LanceDB — data persists across container restarts,
+supports horizontal scaling, and requires zero infrastructure management.
+
+Free tier: 1 index, 100K vectors — sufficient for company policy docs.
+"""
+
+import logging
+
+from pinecone import Pinecone, ServerlessSpec
 import numpy as np
 
 from docvault.config import settings
 
+logger = logging.getLogger(__name__)
 
-_db = None
-_table = None
-
-TABLE_NAME = "chunks"
+_index = None
 
 
-def _get_db():
-    global _db
-    if _db is None:
-        settings.ensure_dirs()
-        _db = lancedb.connect(str(settings.lance_path))
-    return _db
+def _get_index():
+    global _index
+    if _index is None:
+        pc = Pinecone(api_key=settings.pinecone_api_key)
+
+        # Create index if it doesn't exist
+        existing = [idx.name for idx in pc.list_indexes()]
+        if settings.pinecone_index_name not in existing:
+            pc.create_index(
+                name=settings.pinecone_index_name,
+                dimension=settings.embedding_dimensions,
+                metric="cosine",
+                spec=ServerlessSpec(
+                    cloud=settings.pinecone_cloud,
+                    region=settings.pinecone_region,
+                ),
+            )
+            logger.info(f"Created Pinecone index: {settings.pinecone_index_name}")
+
+        _index = pc.Index(settings.pinecone_index_name)
+    return _index
 
 
-def _get_table():
-    global _table
-    if _table is None:
-        db = _get_db()
-        try:
-            _table = db.open_table(TABLE_NAME)
-        except Exception:
-            _table = None
-    return _table
+def index_chunks(
+    chunk_ids: list[str],
+    embeddings: np.ndarray,
+    metadata: list[dict] | None = None,
+):
+    """Upsert chunk vectors into Pinecone."""
+    index = _get_index()
 
-
-def index_chunks(chunk_ids: list[str], embeddings: np.ndarray, metadata: list[dict] | None = None):
-    """Add chunks to dense index."""
-    global _table
-
-    db = _get_db()
-    data = []
+    vectors = []
     for i, chunk_id in enumerate(chunk_ids):
-        row = {
-            "chunk_id": chunk_id,
-            "vector": embeddings[i].tolist(),
-        }
+        meta = {}
         if metadata:
-            row["document_id"] = metadata[i].get("document_id", "")
-            row["section_path"] = metadata[i].get("section_path", "")
-        data.append(row)
+            meta["document_id"] = metadata[i].get("document_id", "")
+            meta["section_path"] = metadata[i].get("section_path", "")
+        vectors.append({
+            "id": chunk_id,
+            "values": embeddings[i].tolist(),
+            "metadata": meta,
+        })
 
-    try:
-        table = db.open_table(TABLE_NAME)
-        table.add(data)
-        _table = table
-    except Exception:
-        _table = db.create_table(TABLE_NAME, data)
+    # Pinecone upsert in batches of 100
+    batch_size = 100
+    for i in range(0, len(vectors), batch_size):
+        batch = vectors[i : i + batch_size]
+        index.upsert(vectors=batch)
+
+    logger.info(f"Indexed {len(vectors)} chunks in Pinecone")
 
 
 def search(query_embedding: np.ndarray, top_k: int | None = None) -> list[dict]:
     """ANN search. Returns list of {chunk_id, score, document_id, section_path}."""
-    table = _get_table()
-    if table is None:
-        return []
-
+    index = _get_index()
     k = top_k or settings.dense_top_k
-    results = table.search(query_embedding.tolist()).limit(k).to_list()
+
+    results = index.query(
+        vector=query_embedding.tolist(),
+        top_k=k,
+        include_metadata=True,
+    )
 
     return [
         {
-            "chunk_id": r["chunk_id"],
-            "score": 1.0 - r.get("_distance", 0.0),  # cosine similarity
-            "document_id": r.get("document_id", ""),
-            "section_path": r.get("section_path", ""),
+            "chunk_id": match.id,
+            "score": match.score,  # cosine similarity [0, 1]
+            "document_id": match.metadata.get("document_id", ""),
+            "section_path": match.metadata.get("section_path", ""),
         }
-        for r in results
+        for match in results.matches
     ]
 
 
 def delete_by_document(document_id: str):
     """Remove all vectors for a document."""
-    table = _get_table()
-    if table is not None:
-        try:
-            table.delete(f"document_id = '{document_id}'")
-        except Exception:
-            pass
+    index = _get_index()
+    # Pinecone requires listing IDs by metadata filter, then deleting
+    # For serverless indexes, use delete with filter
+    try:
+        index.delete(filter={"document_id": {"$eq": document_id}})
+    except Exception as e:
+        logger.warning(f"Failed to delete vectors for {document_id}: {e}")
 
 
 def reset():
-    """Drop and recreate the table."""
-    global _table
-    db = _get_db()
+    """Delete all vectors in the index."""
+    index = _get_index()
     try:
-        db.drop_table(TABLE_NAME)
+        index.delete(delete_all=True)
     except Exception:
         pass
-    _table = None
+
+
+def warmup():
+    """Validate Pinecone connectivity."""
+    index = _get_index()
+    stats = index.describe_index_stats()
+    logger.info(f"Pinecone connected: {stats.total_vector_count} vectors")

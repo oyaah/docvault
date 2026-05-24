@@ -13,7 +13,7 @@ from docvault.config import settings
 logger = logging.getLogger(__name__)
 
 # Public endpoints that don't require auth
-PUBLIC_PATHS = {"/api/health", "/api/metrics", "/docs", "/openapi.json", "/redoc"}
+PUBLIC_PATHS = {"/api/health", "/api/health/live", "/api/health/ready", "/api/metrics", "/docs", "/openapi.json", "/redoc"}
 
 
 def _load_api_keys() -> set[str]:

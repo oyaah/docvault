@@ -1,11 +1,11 @@
 """FastAPI application — DocVault REST API."""
 
 import time
-import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+import structlog
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
@@ -15,9 +15,9 @@ from docvault.ragops.metrics import get_metrics_text
 from docvault.ragops.evaluator import run_eval_suite, save_eval_results, load_golden_dataset
 from docvault.ragops.drift import generate_drift_report
 from docvault.ragops.tracer import load_traces
+from docvault.observability import configure_logging, configure_telemetry
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 pipeline: DocVaultPipeline | None = None
 
@@ -25,11 +25,31 @@ pipeline: DocVaultPipeline | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pipeline
+    configure_logging()
+    configure_telemetry(app)
+
     settings.ensure_dirs()
     pipeline = DocVaultPipeline()
-    logger.info("DocVault pipeline initialized")
+
+    # Pre-warm models — readiness probe only passes after this completes
+    logger.info("pre_warming_models")
+    try:
+        from docvault.ingest.embedder import warmup as warmup_embedder
+        from docvault.retrieval.dense import warmup as warmup_pinecone
+        from docvault.retrieval.reranker import warmup as warmup_reranker
+        from docvault.generation.verifier import warmup as warmup_verifier
+
+        warmup_embedder()
+        warmup_pinecone()
+        warmup_reranker()
+        warmup_verifier()
+        logger.info("models_warmed_up")
+    except Exception as e:
+        logger.error("warmup_failed", error=str(e))
+
+    app.state.ready = True
     yield
-    logger.info("DocVault shutting down")
+    logger.info("docvault_shutting_down")
 
 
 app = FastAPI(
@@ -92,7 +112,7 @@ async def query(req: QueryRequest):
         )
         return QueryResponse(**result)
     except Exception as e:
-        logger.error(f"Query failed: {e}", exc_info=True)
+        logger.error("query_failed", error=str(e), exc_info=True)
         raise HTTPException(500, f"Query failed: {str(e)}")
 
 
@@ -105,23 +125,25 @@ async def ingest(req: IngestRequest):
     if not source.exists():
         raise HTTPException(404, f"Path not found: {req.source_path}")
 
-    # Async mode: dispatch to Celery worker
+    # Async mode: dispatch to Celery worker with agentic pipeline chain
     if req.async_mode:
         try:
-            from docvault.worker import ingest_file_task, ingest_directory_task
+            from docvault.worker import ingest_with_pipeline, ingest_file_task, ingest_directory_task
 
             if source.is_dir():
                 task = ingest_directory_task.delay(
                     str(source), version=req.version, doc_type=req.doc_type,
                 )
             else:
-                task = ingest_file_task.delay(
+                # Use agentic chain: ingest → quality_check → drift_check
+                task_chain = ingest_with_pipeline(
                     str(source), version=req.version,
                     effective_date=req.effective_date, doc_type=req.doc_type,
                 )
+                task = task_chain.apply_async()
             return IngestResponse(task_id=task.id, async_mode=True)
         except Exception as e:
-            logger.warning(f"Celery unavailable, falling back to sync: {e}")
+            logger.warning("celery_unavailable_sync_fallback", error=str(e))
 
     # Sync mode
     t0 = time.time()
@@ -166,6 +188,20 @@ async def ingest_status(task_id: str):
         raise HTTPException(503, f"Celery unavailable: {e}")
 
 
+@app.get("/api/health/live")
+async def liveness():
+    """Liveness probe — is the process alive?"""
+    return {"status": "alive"}
+
+
+@app.get("/api/health/ready")
+async def readiness():
+    """Readiness probe — are models loaded and ready for traffic?"""
+    if not pipeline or not getattr(app.state, "ready", False):
+        raise HTTPException(503, "Not ready")
+    return {"status": "ready"}
+
+
 @app.get("/api/health")
 async def health():
     if not pipeline:
@@ -200,7 +236,7 @@ async def run_eval():
         result = pipeline.query(question)
         return {
             "answer": result["answer"],
-            "retrieved_sections": [c.get("section", "") for c in result.get("citations", [])],
+            "retrieved_sections": result.get("retrieved_sections", []),
             "latency_ms": (time.time() - t0) * 1000,
         }
 

@@ -1,9 +1,15 @@
-"""Celery worker — async document ingestion and scheduled eval tasks."""
+"""Celery worker — async document ingestion, scheduled eval, and agentic task chains.
+
+Task chain pattern (agentic memory handoff):
+  ingest_file → quality_check → drift_check
+  Each task writes results to Redis, next task picks up from there.
+  This is the Celery equivalent of agent-to-agent memory passing.
+"""
 
 import logging
 from pathlib import Path
 
-from celery import Celery
+from celery import Celery, chain
 from celery.schedules import crontab
 
 from docvault.config import settings
@@ -24,7 +30,7 @@ app.conf.update(
     enable_utc=True,
     task_track_started=True,
     task_acks_late=True,
-    worker_prefetch_multiplier=1,  # one task at a time per worker (heavy embedding work)
+    worker_prefetch_multiplier=1,  # one task at a time per worker (heavy work)
     result_expires=3600,
 )
 
@@ -36,11 +42,11 @@ app.conf.beat_schedule = {
     },
     "cleanup-expired-sessions": {
         "task": "docvault.worker.cleanup_sessions",
-        "schedule": crontab(minute="*/30"),  # every 30 min
+        "schedule": crontab(minute="*/30"),
     },
     "drift-report": {
         "task": "docvault.worker.compute_drift_report",
-        "schedule": crontab(hour="*/6"),  # every 6 hours
+        "schedule": crontab(hour="*/6"),
     },
 }
 
@@ -51,6 +57,8 @@ def _get_pipeline():
     settings.ensure_dirs()
     return DocVaultPipeline()
 
+
+# ── Ingest Tasks ────────────────────────────────────────
 
 @app.task(bind=True, name="docvault.worker.ingest_file")
 def ingest_file_task(self, file_path: str, version: str = "1.0",
@@ -83,9 +91,117 @@ def ingest_directory_task(self, dir_path: str, version: str = "1.0",
     return results
 
 
+# ── Quality Check Task ──────────────────────────────────
+
+@app.task(name="docvault.worker.quality_check")
+def quality_check_task(ingest_result: dict | list) -> dict:
+    """Post-ingestion quality check — runs eval on recently ingested documents.
+
+    Part of the agentic pipeline chain: ingest → quality_check → drift_check.
+    Receives ingest result from upstream task via Celery chain.
+    """
+    import time
+    from docvault.ragops.evaluator import run_eval_suite, save_eval_results
+
+    logger.info("[worker] Running post-ingest quality check")
+    pipe = _get_pipeline()
+
+    def query_fn(question: str) -> dict:
+        t0 = time.time()
+        r = pipe.query(question)
+        return {
+            "answer": r["answer"],
+            "retrieved_sections": r.get("retrieved_sections", []),
+            "latency_ms": (time.time() - t0) * 1000,
+        }
+
+    result = run_eval_suite(query_fn)
+    save_eval_results(result)
+
+    status = "pass" if result.avg_retrieval_recall >= 0.5 else "degraded"
+    logger.info(
+        f"[worker] Quality check: {status} "
+        f"(recall={result.avg_retrieval_recall:.3f}, accuracy={result.answer_accuracy:.3f})"
+    )
+
+    return {
+        "status": status,
+        "recall": result.avg_retrieval_recall,
+        "accuracy": result.answer_accuracy,
+        "ingest_result": ingest_result,
+    }
+
+
+# ── Drift Check Task ───────────────────────────────────
+
+@app.task(name="docvault.worker.drift_check")
+def drift_check_task(quality_result: dict) -> dict:
+    """Post-quality drift check — computes embedding and retrieval drift.
+
+    Final task in the agentic chain: ingest → quality_check → drift_check.
+    Triggers re-indexing alert if drift exceeds thresholds.
+    """
+    from docvault.ragops.drift import generate_drift_report
+    import json
+
+    logger.info("[worker] Running post-quality drift check")
+    report = generate_drift_report()
+
+    alerts = []
+    if report.hallucination_rate is not None and report.hallucination_rate > 0.05:
+        alerts.append(f"hallucination_rate={report.hallucination_rate:.2%}")
+    if report.retrieval_quality_trend is not None and report.retrieval_quality_trend < 0.3:
+        alerts.append(f"retrieval_quality={report.retrieval_quality_trend:.3f}")
+
+    if alerts:
+        logger.warning(f"[ALERT] Drift thresholds exceeded: {', '.join(alerts)}")
+
+    # Save report
+    report_path = settings.data_dir / "drift_report.json"
+    report_path.write_text(json.dumps({
+        "embedding_drift": report.embedding_drift,
+        "retrieval_quality_trend": report.retrieval_quality_trend,
+        "hallucination_rate": report.hallucination_rate,
+        "query_volume_7d": report.query_volume_7d,
+        "query_topics": report.query_topics,
+        "timestamp": report.timestamp,
+        "quality_check": quality_result,
+        "alerts": alerts,
+    }, indent=2))
+
+    return {
+        "status": "ok",
+        "alerts": alerts,
+        "timestamp": report.timestamp,
+        "quality_status": quality_result.get("status", "unknown"),
+    }
+
+
+# ── Agentic Chain ───────────────────────────────────────
+
+def ingest_with_pipeline(file_path: str, **kwargs) -> chain:
+    """Create an agentic task chain: ingest → quality_check → drift_check.
+
+    Each task passes its result to the next via Celery chain.
+    This is the production equivalent of agent memory handoff:
+    Agent A completes work → writes result → Agent B picks up from there.
+
+    Usage:
+        task_chain = ingest_with_pipeline("/path/to/doc.md", version="2.0")
+        result = task_chain.apply_async()
+    """
+    return chain(
+        ingest_file_task.s(file_path, **kwargs),
+        quality_check_task.s(),
+        drift_check_task.s(),
+    )
+
+
+# ── Standalone Scheduled Tasks ──────────────────────────
+
 @app.task(name="docvault.worker.run_eval_suite_task")
 def run_eval_suite_task() -> dict:
-    """Scheduled eval suite execution."""
+    """Scheduled eval suite execution (nightly)."""
     import time
     from docvault.ragops.evaluator import run_eval_suite, save_eval_results
 
@@ -97,7 +213,7 @@ def run_eval_suite_task() -> dict:
         r = pipe.query(question)
         return {
             "answer": r["answer"],
-            "retrieved_sections": [c.get("section", "") for c in r.get("citations", [])],
+            "retrieved_sections": r.get("retrieved_sections", []),
             "latency_ms": (time.time() - t0) * 1000,
         }
 
@@ -126,20 +242,18 @@ def cleanup_sessions() -> dict:
 
 @app.task(name="docvault.worker.compute_drift_report")
 def compute_drift_report() -> dict:
-    """Periodic drift detection."""
+    """Periodic drift detection (standalone, not part of chain)."""
     from docvault.ragops.drift import generate_drift_report
     import json
 
     report = generate_drift_report()
 
-    # Log alert conditions
     if report.hallucination_rate is not None and report.hallucination_rate > 0.05:
         logger.warning(f"[ALERT] Hallucination rate {report.hallucination_rate:.2%} exceeds 5% threshold")
 
     if report.retrieval_quality_trend is not None and report.retrieval_quality_trend < 0.3:
         logger.warning(f"[ALERT] Retrieval quality trend {report.retrieval_quality_trend:.3f} is below threshold")
 
-    # Save report
     report_path = settings.data_dir / "drift_report.json"
     report_path.write_text(json.dumps({
         "embedding_drift": report.embedding_drift,

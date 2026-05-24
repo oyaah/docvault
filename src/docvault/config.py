@@ -12,7 +12,12 @@ class Settings(BaseSettings):
 
     # LLM
     llm_model: str = "gpt-4o-mini"
-    embedding_model: str = "BAAI/bge-m3"
+
+    # Embedding backend: "openai" (cloud API) or "local" (sentence-transformers)
+    embedding_backend: str = "openai"
+    openai_embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536  # OpenAI text-embedding-3-small
+    local_embedding_model: str = "BAAI/bge-m3"
 
     # Chunking
     chunk_size: int = 400  # tokens
@@ -26,8 +31,14 @@ class Settings(BaseSettings):
     rerank_top_k: int = 5
     context_budget_tokens: int = 3000
 
+    # Pinecone (managed vector DB)
+    pinecone_api_key: str = ""
+    pinecone_index_name: str = "docvault"
+    pinecone_cloud: str = "aws"
+    pinecone_region: str = "us-east-1"
+
     # Confidence
-    confidence_threshold: float = 0.3
+    confidence_threshold: float = 0.0  # raw ms-marco score; >0 = relevant
 
     # Memory
     session_ttl_seconds: int = 1800  # 30 min
@@ -48,21 +59,22 @@ class Settings(BaseSettings):
     # Observability
     trace_log_path: Path = Field(default=Path("./data/traces.jsonl"))
     metrics_enabled: bool = True
+    otel_exporter_endpoint: str = ""  # OTLP endpoint, empty = stdout
 
     # Drift
     embedding_drift_threshold: float = 0.01  # alert if drift > this
+
+    # ONNX models directory (for reranker + verifier)
+    onnx_models_dir: Path = Path("./models")
 
     @property
     def db_path(self) -> Path:
         return self.data_dir / "docvault.db"
 
-    @property
-    def lance_path(self) -> Path:
-        return self.data_dir / "lance"
-
     def ensure_dirs(self):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
+        self.onnx_models_dir.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()

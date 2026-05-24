@@ -10,3 +10,9 @@ data/
 .ruff_cache/
 .pytest_cache/
 grafana-data/
+.coverage
+htmlcov/
+
+# ONNX models (large files — use git-lfs or download from S3)
+# Uncomment to track: models/*.onnx
+models/*.onnx

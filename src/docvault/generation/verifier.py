@@ -1,17 +1,33 @@
-"""NLI-based hallucination verifier — checks each claim against source context."""
+"""NLI-based hallucination verifier — ONNX Runtime inference (no torch needed).
+
+Checks each claim against source context. Claims with confident
+contradiction scores are stripped from the answer.
+
+Uses pre-exported ONNX model for nli-deberta-v3-small.
+Export with: python scripts/export_onnx.py
+"""
 
 import re
+import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
-from sentence_transformers import CrossEncoder
+import onnxruntime as ort
+from transformers import AutoTokenizer
 
+from docvault.config import settings
 
-_nli_model: CrossEncoder | None = None
+logger = logging.getLogger(__name__)
+
 NLI_MODEL = "cross-encoder/nli-deberta-v3-small"
+ONNX_FILE = "verifier.onnx"
 
 # Labels: 0=contradiction, 1=entailment, 2=neutral
 LABEL_MAP = {0: "contradiction", 1: "entailment", 2: "neutral"}
+
+_session: ort.InferenceSession | None = None
+_tokenizer = None
 
 
 @dataclass
@@ -24,17 +40,34 @@ class VerificationResult:
     claims_stripped: int
 
 
-def get_nli_model() -> CrossEncoder:
-    global _nli_model
-    if _nli_model is None:
-        _nli_model = CrossEncoder(NLI_MODEL)
-    return _nli_model
+def _get_session() -> ort.InferenceSession:
+    global _session
+    if _session is None:
+        model_path = settings.onnx_models_dir / ONNX_FILE
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"ONNX verifier model not found at {model_path}. "
+                f"Run: python scripts/export_onnx.py"
+            )
+        _session = ort.InferenceSession(
+            str(model_path),
+            providers=["CPUExecutionProvider"],
+        )
+        logger.info(f"Loaded ONNX verifier from {model_path}")
+    return _session
+
+
+def _get_tokenizer():
+    global _tokenizer
+    if _tokenizer is None:
+        _tokenizer = AutoTokenizer.from_pretrained(NLI_MODEL)
+    return _tokenizer
 
 
 def verify_answer(answer: str, context_chunks: list[dict], threshold: float = 0.7) -> VerificationResult:
     """Verify each claim in the answer against the source context.
 
-    Claims that contradict or aren't supported by the context are stripped.
+    Claims that contradict the context are stripped.
     """
     claims = _extract_claims(answer)
 
@@ -49,30 +82,35 @@ def verify_answer(answer: str, context_chunks: list[dict], threshold: float = 0.
         )
 
     context_text = "\n".join(c["content"] for c in context_chunks)
-    model = get_nli_model()
+    session = _get_session()
+    tokenizer = _get_tokenizer()
 
     verified_claims = []
     stripped_count = 0
 
     for claim_text in claims:
         # NLI: premise=context, hypothesis=claim
-        scores = model.predict([(context_text, claim_text)])
-        score = scores[0] if isinstance(scores[0], float) else scores[0].tolist()
+        inputs = tokenizer(
+            [context_text], [claim_text],
+            return_tensors="np",
+            padding=True,
+            truncation=True,
+            max_length=512,
+        )
 
-        # For models that return logits per class
-        if hasattr(score, "__len__") and len(score) == 3:
-            # Convert raw logits to probabilities via softmax
-            probs = np.exp(score - np.max(score))
-            probs = probs / probs.sum()
-            label_idx = int(np.argmax(probs))
-            label = LABEL_MAP[label_idx]
-            entailment_prob = float(probs[1])
-            contradiction_prob = float(probs[0])
-        else:
-            # Binary: positive = entailment
-            label = "entailment" if float(score) > 0.5 else "contradiction"
-            entailment_prob = float(score)
-            contradiction_prob = 1.0 - entailment_prob
+        input_names = {inp.name for inp in session.get_inputs()}
+        feed = {k: v for k, v in inputs.items() if k in input_names}
+        outputs = session.run(None, feed)
+        logits = outputs[0][0]
+
+        # Convert raw logits to probabilities via softmax
+        probs = np.exp(logits - np.max(logits))
+        probs = probs / probs.sum()
+
+        label_idx = int(np.argmax(probs))
+        label = LABEL_MAP[label_idx]
+        entailment_prob = float(probs[1])
+        contradiction_prob = float(probs[0])
 
         # Strip only when contradiction is confident — neutral means uncertain, not wrong
         is_stripped = contradiction_prob > threshold
@@ -108,18 +146,21 @@ def verify_answer(answer: str, context_chunks: list[dict], threshold: float = 0.
     )
 
 
+def warmup():
+    """Pre-load model and tokenizer."""
+    _get_session()
+    _get_tokenizer()
+    logger.info("ONNX verifier warmed up")
+
+
 def _extract_claims(answer: str) -> list[str]:
     """Split answer into individual claims (sentences)."""
-    # Remove citation markers for claim extraction
     clean = re.sub(r"\[Source:[^\]]*\]", "", answer)
-
-    # Split on sentence boundaries
     sentences = re.split(r"(?<=[.!?])\s+", clean)
 
     claims = []
     for s in sentences:
         s = s.strip()
-        # Skip meta-sentences like "I couldn't find..."
         if s and len(s) > 20 and not s.lower().startswith("i couldn't find") and not s.lower().startswith("please check"):
             claims.append(s)
 

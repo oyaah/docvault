@@ -1,41 +1,75 @@
+version: "3.9"
+
+x-docvault-env: &docvault-env
+  DOCVAULT_REDIS_URL: redis://redis:6379/0
+  DOCVAULT_CELERY_BROKER_URL: redis://redis:6379/1
+  DOCVAULT_CELERY_RESULT_BACKEND: redis://redis:6379/1
+  DOCVAULT_EMBEDDING_BACKEND: openai
+  DOCVAULT_ONNX_MODELS_DIR: /app/models
+
+x-docvault-common: &docvault-common
+  image: docvault:local
+  env_file:
+    - .env
+  environment: *docvault-env
+  depends_on:
+    redis:
+      condition: service_healthy
+
 services:
   docvault:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    <<: *docvault-common
     ports:
       - "8000:8000"
     volumes:
       - ./data:/app/data
       - ./corpus:/app/corpus
-    env_file:
-      - .env
-    depends_on:
-      - redis
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
 
-  # Celery worker for async ingestion and scheduled tasks
   worker:
-    build: .
+    <<: *docvault-common
     command: celery -A docvault.worker worker --loglevel=info --concurrency=2
     volumes:
       - ./data:/app/data
       - ./corpus:/app/corpus
-    env_file:
-      - .env
-    depends_on:
-      - redis
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
 
-  # Celery beat for scheduled tasks (nightly evals, drift reports)
   beat:
-    build: .
+    <<: *docvault-common
     command: celery -A docvault.worker beat --loglevel=info
     volumes:
       - ./data:/app/data
-    env_file:
-      - .env
-    depends_on:
-      - redis
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
 
   redis:
     image: redis:7-alpine
@@ -43,8 +77,17 @@ services:
       - "6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   prometheus:
     image: prom/prometheus:latest
@@ -53,6 +96,10 @@ services:
     volumes:
       - ./dashboards/prometheus.yml:/etc/prometheus/prometheus.yml
       - ./dashboards/alerts.yml:/etc/prometheus/alerts.yml
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
     restart: unless-stopped
 
   grafana:
@@ -61,11 +108,16 @@ services:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=docvault
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+      - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana-data:/var/lib/grafana
       - ./dashboards/grafana.json:/var/lib/grafana/dashboards/docvault.json
+    depends_on:
+      - prometheus
     restart: unless-stopped
 
 volumes:
   redis-data:
+  prometheus-data:
   grafana-data:

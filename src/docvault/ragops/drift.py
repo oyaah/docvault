@@ -11,7 +11,9 @@ import numpy as np
 from docvault.config import settings
 from docvault.ragops.tracer import load_traces
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass

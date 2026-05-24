@@ -23,7 +23,9 @@ from docvault.ragops import metrics
 
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
 class DocVaultPipeline:
@@ -282,7 +284,7 @@ class DocVaultPipeline:
             metrics.HALLUCINATION_RATE.set(rate)
 
         # ── Final response ──
-        confidence = "high" if top_score > 0.6 else "medium"
+        confidence = "high" if top_score > 5.0 else "medium"
         trace.confidence = confidence
         trace.total_latency_ms = (time.time() - t_total) * 1000
         trace.save()

@@ -1,0 +1,167 @@
+{
+  "family": "docvault",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "2048",
+  "memory": "4096",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/docvault-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/docvault-ecs-task-role",
+  "containerDefinitions": [
+    {
+      "name": "api",
+      "image": "ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/docvault:latest",
+      "cpu": 1024,
+      "memory": 2048,
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8000/api/health/ready || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      },
+      "environment": [
+        {
+          "name": "DOCVAULT_EMBEDDING_BACKEND",
+          "value": "openai"
+        },
+        {
+          "name": "DOCVAULT_REDIS_URL",
+          "value": "redis://docvault-redis.xxxxx.0001.use1.cache.amazonaws.com:6379/0"
+        },
+        {
+          "name": "DOCVAULT_CELERY_BROKER_URL",
+          "value": "redis://docvault-redis.xxxxx.0001.use1.cache.amazonaws.com:6379/1"
+        },
+        {
+          "name": "DOCVAULT_CELERY_RESULT_BACKEND",
+          "value": "redis://docvault-redis.xxxxx.0001.use1.cache.amazonaws.com:6379/2"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:docvault/openai-api-key"
+        },
+        {
+          "name": "DOCVAULT_PINECONE_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:docvault/pinecone-api-key"
+        },
+        {
+          "name": "DOCVAULT_API_KEYS",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:docvault/api-keys"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/docvault",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "api"
+        }
+      }
+    },
+    {
+      "name": "worker",
+      "image": "ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/docvault:latest",
+      "cpu": 768,
+      "memory": 1536,
+      "essential": true,
+      "command": ["celery", "-A", "docvault.worker", "worker", "--loglevel=info", "--concurrency=2"],
+      "environment": [
+        {
+          "name": "DOCVAULT_EMBEDDING_BACKEND",
+          "value": "openai"
+        },
+        {
+          "name": "DOCVAULT_REDIS_URL",
+          "value": "redis://docvault-redis.xxxxx.0001.use1.cache.amazonaws.com:6379/0"
+        },
+        {
+          "name": "DOCVAULT_CELERY_BROKER_URL",
+          "value": "redis://docvault-redis.xxxxx.0001.use1.cache.amazonaws.com:6379/1"
+        },
+        {
+          "name": "DOCVAULT_CELERY_RESULT_BACKEND",
+          "value": "redis://docvault-redis.xxxxx.0001.use1.cache.amazonaws.com:6379/2"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:docvault/openai-api-key"
+        },
+        {
+          "name": "DOCVAULT_PINECONE_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:docvault/pinecone-api-key"
+        },
+        {
+          "name": "DOCVAULT_API_KEYS",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:docvault/api-keys"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/docvault",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "worker"
+        }
+      }
+    },
+    {
+      "name": "beat",
+      "image": "ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/docvault:latest",
+      "cpu": 256,
+      "memory": 512,
+      "essential": false,
+      "command": ["celery", "-A", "docvault.worker", "beat", "--loglevel=info"],
+      "environment": [
+        {
+          "name": "DOCVAULT_EMBEDDING_BACKEND",
+          "value": "openai"
+        },
+        {
+          "name": "DOCVAULT_REDIS_URL",
+          "value": "redis://docvault-redis.xxxxx.0001.use1.cache.amazonaws.com:6379/0"
+        },
+        {
+          "name": "DOCVAULT_CELERY_BROKER_URL",
+          "value": "redis://docvault-redis.xxxxx.0001.use1.cache.amazonaws.com:6379/1"
+        },
+        {
+          "name": "DOCVAULT_CELERY_RESULT_BACKEND",
+          "value": "redis://docvault-redis.xxxxx.0001.use1.cache.amazonaws.com:6379/2"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:docvault/openai-api-key"
+        },
+        {
+          "name": "DOCVAULT_PINECONE_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:docvault/pinecone-api-key"
+        },
+        {
+          "name": "DOCVAULT_API_KEYS",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:docvault/api-keys"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/docvault",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "beat"
+        }
+      }
+    }
+  ]
+}

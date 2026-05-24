@@ -1,0 +1,39 @@
+{
+  "serviceName": "docvault",
+  "cluster": "docvault-cluster",
+  "taskDefinition": "docvault",
+  "desiredCount": 1,
+  "launchType": "FARGATE",
+  "platformVersion": "LATEST",
+  "enableExecuteCommand": true,
+  "deploymentConfiguration": {
+    "minimumHealthyPercent": 50,
+    "maximumPercent": 200,
+    "deploymentCircuitBreaker": {
+      "enable": true,
+      "rollback": true
+    }
+  },
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": [
+        "subnet-XXXXXXXXXXXXXXXXX",
+        "subnet-YYYYYYYYYYYYYYYYY"
+      ],
+      "securityGroups": [
+        "sg-XXXXXXXXXXXXXXXXX"
+      ],
+      "assignPublicIp": "DISABLED"
+    }
+  },
+  "loadBalancers": [
+    {
+      "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:ACCOUNT_ID:targetgroup/docvault-tg/XXXXXXXXXX",
+      "containerName": "api",
+      "containerPort": 8000
+    }
+  ],
+  "healthCheckGracePeriodSeconds": 120,
+  "schedulingStrategy": "REPLICA",
+  "propagateTags": "SERVICE"
+}
