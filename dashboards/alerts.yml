@@ -1,0 +1,93 @@
+groups:
+  - name: docvault_alerts
+    rules:
+      # Hallucination rate exceeds 5% over 1 hour
+      - alert: HighHallucinationRate
+        expr: docvault_hallucination_rate > 0.05
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hallucination rate is {{ $value | humanizePercentage }}"
+          description: >
+            DocVault hallucination rate has exceeded 5% for the last hour.
+            Claims are being stripped from responses at an elevated rate.
+            Investigate retrieval quality and source document coverage.
+
+      # P95 query latency exceeds 500ms
+      - alert: HighQueryLatency
+        expr: histogram_quantile(0.95, rate(docvault_query_latency_seconds_bucket{stage="total"}[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 query latency is {{ $value }}s"
+          description: >
+            DocVault P95 query latency exceeds 500ms. Check retrieval
+            performance, reranker load, or LLM response times.
+
+      # P99 query latency exceeds 2s
+      - alert: CriticalQueryLatency
+        expr: histogram_quantile(0.99, rate(docvault_query_latency_seconds_bucket{stage="total"}[5m])) > 2.0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "P99 query latency is {{ $value }}s"
+          description: >
+            DocVault P99 latency exceeds 2 seconds. Likely LLM timeout
+            or embedding model bottleneck.
+
+      # Low retrieval confidence (too many "I don't know" responses)
+      - alert: LowRetrievalConfidence
+        expr: |
+          histogram_quantile(0.50, rate(docvault_confidence_score_bucket[30m])) < 0.3
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Median retrieval confidence below 0.3"
+          description: >
+            More than half of queries are returning low-confidence results.
+            This may indicate a coverage gap in the document corpus or
+            embedding quality degradation.
+
+      # Query error rate spike
+      - alert: QueryErrorRate
+        expr: |
+          rate(docvault_query_errors_total[5m])
+          / rate(docvault_query_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Query error rate exceeds 10%"
+          description: >
+            More than 10% of queries are failing. Check API logs
+            and LLM provider status.
+
+      # No queries received (pipeline might be down)
+      - alert: NoQueriesReceived
+        expr: increase(docvault_query_total[30m]) == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No queries received in 30 minutes"
+          description: >
+            DocVault has not received any queries in the last 30 minutes.
+            Verify the service is healthy and reachable.
+
+      # NLI verification scores dropping
+      - alert: NLIScoreDegradation
+        expr: |
+          histogram_quantile(0.50, rate(docvault_nli_score_bucket[1h])) < 0.5
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Median NLI score dropped below 0.5"
+          description: >
+            The hallucination verification model is flagging a high
+            proportion of generated claims as ungrounded. This could
+            indicate a mismatch between retrieved context and LLM output.

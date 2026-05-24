@@ -146,12 +146,18 @@ class DocumentStore:
         )
 
     def add_chunks(self, chunks: list[dict]):
-        """Insert chunks in batch. Each dict: document_id, parent_chunk_id, content,
-        section_path, chunk_index, chunk_hash, token_count, metadata."""
-        now = datetime.utcnow().isoformat()
+        """Insert chunks in batch with parent linking.
+
+        Resolves _parent_index references to actual DB chunk IDs after insertion.
+        """
+        now = datetime.now(datetime.UTC).isoformat() if hasattr(datetime, 'UTC') else datetime.utcnow().isoformat()
+        chunk_ids = []
+
         with self._conn() as conn:
+            # First pass: insert all chunks without parent links
             for chunk in chunks:
                 chunk_id = str(uuid.uuid4())
+                chunk_ids.append(chunk_id)
                 conn.execute(
                     """INSERT INTO chunks (id, document_id, parent_chunk_id, content,
                        section_path, chunk_index, chunk_hash, token_count, metadata, created_at)
@@ -159,7 +165,7 @@ class DocumentStore:
                     (
                         chunk_id,
                         chunk["document_id"],
-                        chunk.get("parent_chunk_id"),
+                        None,  # parent set in second pass
                         chunk["content"],
                         chunk.get("section_path", ""),
                         chunk["chunk_index"],
@@ -169,6 +175,17 @@ class DocumentStore:
                         now,
                     ),
                 )
+
+            # Second pass: resolve parent links using _parent_index
+            for i, chunk in enumerate(chunks):
+                parent_idx = chunk.get("_parent_index")
+                if parent_idx is not None and parent_idx < len(chunk_ids):
+                    parent_id = chunk_ids[parent_idx]
+                    conn.execute(
+                        "UPDATE chunks SET parent_chunk_id = ? WHERE id = ?",
+                        (parent_id, chunk_ids[i]),
+                    )
+
             # Update document chunk count
             if chunks:
                 doc_id = chunks[0]["document_id"]
@@ -176,6 +193,8 @@ class DocumentStore:
                     "UPDATE documents SET total_chunks = ? WHERE id = ?",
                     (len(chunks), doc_id),
                 )
+
+        return chunk_ids
 
     def get_chunk_by_id(self, chunk_id: str) -> dict | None:
         with self._conn() as conn:

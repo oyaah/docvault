@@ -3,38 +3,37 @@
 import time
 import numpy as np
 
-from docvault.memory.session import SessionManager, Session
+from docvault.memory.session import SessionStore
 from docvault.memory.cache import RetrievalCache
 
 
 def test_session_management():
-    mgr = SessionManager()
-    session = mgr.get_or_create("sess-1")
-    assert session.id == "sess-1"
-    assert len(session.turns) == 0
-
-    session.add_turn("What is PTO?", "15 days for new employees.")
-    assert len(session.turns) == 1
-
-    # Same session returned
-    same = mgr.get_or_create("sess-1")
-    assert len(same.turns) == 1
+    store = SessionStore()
+    store.get_or_create_session("sess-1")
+    store.add_turn("sess-1", "What is PTO?", "15 days for new employees.")
+    history = store.get_history("sess-1")
+    assert len(history) == 1
+    assert history[0]["question"] == "What is PTO?"
 
 
 def test_session_max_turns():
-    session = Session(id="test")
+    store = SessionStore()
+    store.get_or_create_session("sess-max")
     for i in range(10):
-        session.add_turn(f"Q{i}", f"A{i}")
-    # Should only keep last 5 (default max_session_turns)
-    assert len(session.turns) == 5
-    assert session.turns[0].question == "Q5"
+        store.add_turn("sess-max", f"Q{i}", f"A{i}")
+    history = store.get_history("sess-max")
+    # Should only keep last max_session_turns (default 5)
+    assert len(history) == 5
+    assert history[0]["question"] == "Q5"
 
 
 def test_session_history_format():
-    session = Session(id="test")
-    session.add_turn("What is PTO?", "15 days.")
-    history = session.get_history()
-    assert history == [{"question": "What is PTO?", "answer": "15 days."}]
+    store = SessionStore()
+    store.get_or_create_session("sess-fmt")
+    store.add_turn("sess-fmt", "What is PTO?", "15 days.")
+    history = store.get_history("sess-fmt")
+    assert history[0]["question"] == "What is PTO?"
+    assert history[0]["answer"] == "15 days."
 
 
 def test_cache_put_get():

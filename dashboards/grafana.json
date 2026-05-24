@@ -1,0 +1,166 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "Query Latency by Stage",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(docvault_query_latency_seconds_bucket{stage=\"total\"}[5m]))",
+          "legendFormat": "Total P50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(docvault_query_latency_seconds_bucket{stage=\"total\"}[5m]))",
+          "legendFormat": "Total P95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, rate(docvault_query_latency_seconds_bucket{stage=\"retrieval\"}[5m]))",
+          "legendFormat": "Retrieval P50"
+        },
+        {
+          "expr": "histogram_quantile(0.50, rate(docvault_query_latency_seconds_bucket{stage=\"generation\"}[5m]))",
+          "legendFormat": "Generation P50"
+        }
+      ]
+    },
+    {
+      "title": "Confidence Score Distribution",
+      "type": "histogram",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "rate(docvault_confidence_score_bucket[5m])",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": []
+      }
+    },
+    {
+      "title": "Hallucination Rate (Rolling)",
+      "type": "gauge",
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "docvault_hallucination_rate",
+          "legendFormat": "Hallucination Rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.03},
+              {"color": "red", "value": 0.05}
+            ]
+          },
+          "min": 0,
+          "max": 0.2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "NLI Verification Scores",
+      "type": "histogram",
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "rate(docvault_nli_score_bucket[5m])",
+          "legendFormat": "{{le}}"
+        }
+      ]
+    },
+    {
+      "title": "Cache Hit Ratio",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "docvault_cache_hits_total / (docvault_cache_hits_total + docvault_cache_misses_total)",
+          "legendFormat": "Hit Ratio"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "percentunit"},
+        "overrides": []
+      }
+    },
+    {
+      "title": "Active Documents & Chunks",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "docvault_active_documents",
+          "legendFormat": "Documents"
+        },
+        {
+          "expr": "docvault_active_chunks",
+          "legendFormat": "Chunks"
+        }
+      ]
+    },
+    {
+      "title": "Query Volume",
+      "type": "timeseries",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "rate(docvault_query_total[5m]) * 60",
+          "legendFormat": "Queries/min"
+        }
+      ]
+    },
+    {
+      "title": "Errors",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "increase(docvault_query_errors_total[1h])",
+          "legendFormat": "Errors (1h)"
+        },
+        {
+          "expr": "increase(docvault_ingest_total[1h])",
+          "legendFormat": "Ingests (1h)"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["docvault", "rag", "observability"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "DocVault — RAG Pipeline Health",
+  "uid": "docvault-main",
+  "version": 1
+}

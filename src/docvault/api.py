@@ -5,9 +5,9 @@ import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from docvault.config import settings
 from docvault.pipeline import DocVaultPipeline
@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="DocVault",
     description="Industry-grade RAG pipeline for company policy Q&A",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -61,13 +61,16 @@ class IngestRequest(BaseModel):
     version: str = "1.0"
     effective_date: str | None = None
     doc_type: str | None = None
+    async_mode: bool = False  # use Celery worker
 
 
 class IngestResponse(BaseModel):
-    results: list[dict]
-    total_documents: int
-    total_chunks: int
-    time_ms: int
+    results: list[dict] | None = None
+    task_id: str | None = None
+    total_documents: int = 0
+    total_chunks: int = 0
+    time_ms: int = 0
+    async_mode: bool = False
 
 
 # ── Endpoints ────────────────────────────────────────────
@@ -98,6 +101,25 @@ async def ingest(req: IngestRequest):
     if not source.exists():
         raise HTTPException(404, f"Path not found: {req.source_path}")
 
+    # Async mode: dispatch to Celery worker
+    if req.async_mode:
+        try:
+            from docvault.worker import ingest_file_task, ingest_directory_task
+
+            if source.is_dir():
+                task = ingest_directory_task.delay(
+                    str(source), version=req.version, doc_type=req.doc_type,
+                )
+            else:
+                task = ingest_file_task.delay(
+                    str(source), version=req.version,
+                    effective_date=req.effective_date, doc_type=req.doc_type,
+                )
+            return IngestResponse(task_id=task.id, async_mode=True)
+        except Exception as e:
+            logger.warning(f"Celery unavailable, falling back to sync: {e}")
+
+    # Sync mode
     t0 = time.time()
 
     if source.is_dir():
@@ -124,6 +146,22 @@ async def ingest(req: IngestRequest):
     )
 
 
+@app.get("/api/ingest/status/{task_id}")
+async def ingest_status(task_id: str):
+    """Check async ingest task status."""
+    try:
+        from docvault.worker import app as celery_app
+        result = celery_app.AsyncResult(task_id)
+        return {
+            "task_id": task_id,
+            "status": result.status,
+            "result": result.result if result.ready() else None,
+            "info": result.info if not result.ready() else None,
+        }
+    except Exception as e:
+        raise HTTPException(503, f"Celery unavailable: {e}")
+
+
 @app.get("/api/health")
 async def health():
     if not pipeline:
@@ -134,6 +172,7 @@ async def health():
         "active_documents": stats["active_documents"],
         "active_chunks": stats["active_chunks"],
         "cache": pipeline.cache.stats(),
+        "sessions": pipeline.sessions.stats(),
     }
 
 
@@ -185,9 +224,12 @@ async def eval_results():
 async def drift_report():
     report = generate_drift_report()
     return {
+        "embedding_drift": report.embedding_drift,
         "retrieval_quality_trend": report.retrieval_quality_trend,
+        "avg_confidence": report.avg_confidence,
         "hallucination_rate": report.hallucination_rate,
         "query_volume_7d": report.query_volume_7d,
+        "query_topics": report.query_topics,
         "timestamp": report.timestamp,
     }
 

@@ -1,14 +1,13 @@
 """Core pipeline — orchestrates ingest and query flows."""
 
 import time
-import uuid
 import logging
 
 import numpy as np
 
 from docvault.config import settings
 from docvault.storage.documents import DocumentStore
-from docvault.ingest.parser import parse_file, ParsedDocument
+from docvault.ingest.parser import parse_file
 from docvault.ingest.chunker import chunk_document
 from docvault.ingest.embedder import embed_texts, embed_query
 from docvault.retrieval import dense, sparse
@@ -16,9 +15,10 @@ from docvault.retrieval.fusion import reciprocal_rank_fusion
 from docvault.retrieval.reranker import rerank
 from docvault.generation.generator import generate_answer, expand_query
 from docvault.generation.verifier import verify_answer
-from docvault.memory.session import SessionManager
+from docvault.memory.session import SessionStore
 from docvault.memory.cache import RetrievalCache
 from docvault.ragops.tracer import QueryTrace, RetrievalTrace, GenerationTrace, VerificationTrace
+from docvault.ragops.drift import compute_embedding_drift
 from docvault.ragops import metrics
 
 from pathlib import Path
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class DocVaultPipeline:
     def __init__(self, store: DocumentStore | None = None):
         self.store = store or DocumentStore()
-        self.sessions = SessionManager()
+        self.sessions = SessionStore()
         self.cache = RetrievalCache()
 
     # ── Ingest ──────────────────────────────────────────────
@@ -66,19 +66,24 @@ class DocVaultPipeline:
         hashes = [c["chunk_hash"] for c in chunks]
         embeddings = embed_texts(texts, chunk_hashes=hashes)
 
-        # Store chunks in SQLite
-        self.store.add_chunks(chunks)
+        # Embedding drift detection
+        drift = compute_embedding_drift(embeddings)
+        if drift is not None:
+            logger.info(f"Embedding drift: {drift:.6f}")
+
+        # Store chunks in SQLite (with parent linking)
+        chunk_ids = self.store.add_chunks(chunks)
 
         # Get chunk IDs from DB for dense index
         db_chunks = self.store.get_chunks_by_document(doc.id)
-        chunk_ids = [c["id"] for c in db_chunks]
+        db_chunk_ids = [c["id"] for c in db_chunks]
         chunk_meta = [
             {"document_id": doc.id, "section_path": c["section_path"]}
             for c in db_chunks
         ]
 
         # Index in LanceDB
-        dense.index_chunks(chunk_ids, embeddings, metadata=chunk_meta)
+        dense.index_chunks(db_chunk_ids, embeddings, metadata=chunk_meta)
 
         # Invalidate retrieval cache
         self.cache.invalidate()
@@ -92,12 +97,16 @@ class DocVaultPipeline:
         elapsed = (time.time() - t0) * 1000
         logger.info(f"Ingested {parsed.title}: {len(chunks)} chunks in {elapsed:.0f}ms")
 
-        return {
+        result = {
             "document_id": doc.id,
             "title": parsed.title,
             "chunks": len(chunks),
             "time_ms": round(elapsed),
         }
+        if drift is not None:
+            result["embedding_drift"] = drift
+
+        return result
 
     def ingest_directory(
         self,
@@ -133,11 +142,10 @@ class DocVaultPipeline:
         t_total = time.time()
 
         # Session memory
-        session = None
         history = []
         if session_id:
-            session = self.sessions.get_or_create(session_id)
-            history = session.get_history()
+            self.sessions.get_or_create_session(session_id)
+            history = self.sessions.get_history(session_id)
 
         # Query expansion for short queries
         queries = expand_query(question)
@@ -205,8 +213,8 @@ class DocVaultPipeline:
             trace.save()
             metrics.QUERY_TOTAL.inc()
 
-            if session:
-                session.add_turn(question, no_answer)
+            if session_id:
+                self.sessions.add_turn(session_id, question, no_answer, confidence="low")
 
             return {
                 "answer": no_answer,
@@ -229,16 +237,15 @@ class DocVaultPipeline:
             # Also fetch parent chunk for broader context
             parent = self.store.get_parent_chunk(chunk.get("chunk_id", ""))
             if parent and parent["id"] != chunk.get("chunk_id"):
-                parent_doc = doc
                 context_chunks.append({
                     "content": parent["content"],
                     "section_path": parent.get("section_path", ""),
-                    "doc_title": parent_doc.title if parent_doc else "Unknown",
-                    "doc_version": parent_doc.version if parent_doc else "",
+                    "doc_title": doc.title if doc else "Unknown",
+                    "doc_version": doc.version if doc else "",
                     "is_parent": True,
                 })
 
-        # Deduplicate by content hash
+        # Deduplicate by content prefix
         seen = set()
         unique_chunks = []
         for c in context_chunks:
@@ -259,7 +266,6 @@ class DocVaultPipeline:
         )
 
         # ── Verification ──
-        t_ver = time.time()
         verification = verify_answer(gen_result["answer"], context_chunks)
         trace.verification = VerificationTrace(
             claims_total=verification.claims_total,
@@ -271,7 +277,6 @@ class DocVaultPipeline:
         for score in trace.verification.nli_scores:
             metrics.NLI_SCORES.observe(score)
 
-        # Update hallucination rate
         if verification.claims_total > 0:
             rate = verification.claims_stripped / verification.claims_total
             metrics.HALLUCINATION_RATE.set(rate)
@@ -290,8 +295,11 @@ class DocVaultPipeline:
         answer = verification.verified_answer
         citations = gen_result["citations"]
 
-        if session:
-            session.add_turn(question, answer)
+        if session_id:
+            self.sessions.add_turn(
+                session_id, question, answer,
+                citations=citations, confidence=confidence, trace_id=trace.trace_id,
+            )
 
         return {
             "answer": answer,

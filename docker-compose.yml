@@ -8,6 +8,42 @@ services:
       - ./corpus:/app/corpus
     env_file:
       - .env
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # Celery worker for async ingestion and scheduled tasks
+  worker:
+    build: .
+    command: celery -A docvault.worker worker --loglevel=info --concurrency=2
+    volumes:
+      - ./data:/app/data
+      - ./corpus:/app/corpus
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # Celery beat for scheduled tasks (nightly evals, drift reports)
+  beat:
+    build: .
+    command: celery -A docvault.worker beat --loglevel=info
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
     restart: unless-stopped
 
   prometheus:
@@ -16,6 +52,7 @@ services:
       - "9090:9090"
     volumes:
       - ./dashboards/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./dashboards/alerts.yml:/etc/prometheus/alerts.yml
     restart: unless-stopped
 
   grafana:
@@ -26,7 +63,9 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=docvault
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./dashboards/grafana.json:/var/lib/grafana/dashboards/docvault.json
     restart: unless-stopped
 
 volumes:
+  redis-data:
   grafana-data:

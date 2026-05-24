@@ -23,6 +23,9 @@ dependencies = [
     "torch>=2.0",
     # LLM
     "litellm>=1.40",
+    # Memory & async
+    "redis>=5.0",
+    "celery>=5.3",
     # Metrics
     "prometheus-client>=0.20",
     # Eval

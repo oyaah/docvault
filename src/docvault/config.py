@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     max_session_turns: int = 5
     cache_ttl_seconds: int = 3600  # 1 hour
 
+    # Redis
+    redis_url: str = "redis://localhost:6379/0"
+
+    # Celery
+    celery_broker_url: str = "redis://localhost:6379/1"
+    celery_result_backend: str = "redis://localhost:6379/1"
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
@@ -41,6 +48,9 @@ class Settings(BaseSettings):
     # Observability
     trace_log_path: Path = Field(default=Path("./data/traces.jsonl"))
     metrics_enabled: bool = True
+
+    # Drift
+    embedding_drift_threshold: float = 0.01  # alert if drift > this
 
     @property
     def db_path(self) -> Path:
