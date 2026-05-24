@@ -1,5 +1,6 @@
 """Cross-encoder reranker — deep query-chunk relevance scoring."""
 
+import numpy as np
 from sentence_transformers import CrossEncoder
 
 from docvault.config import settings
@@ -38,7 +39,9 @@ def rerank(
     model = get_model()
 
     pairs = [(query, chunk["content"]) for chunk in chunks]
-    scores = model.predict(pairs)
+    raw_scores = model.predict(pairs)
+    # Normalize raw logits to [0,1] via sigmoid
+    scores = 1.0 / (1.0 + np.exp(-np.array(raw_scores)))
 
     for i, chunk in enumerate(chunks):
         chunk["rerank_score"] = float(scores[i])

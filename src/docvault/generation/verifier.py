@@ -3,6 +3,7 @@
 import re
 from dataclasses import dataclass
 
+import numpy as np
 from sentence_transformers import CrossEncoder
 
 
@@ -60,20 +61,26 @@ def verify_answer(answer: str, context_chunks: list[dict], threshold: float = 0.
 
         # For models that return logits per class
         if hasattr(score, "__len__") and len(score) == 3:
-            label_idx = int(max(range(3), key=lambda i: score[i]))
-            confidence = float(score[label_idx])
+            # Convert raw logits to probabilities via softmax
+            probs = np.exp(score - np.max(score))
+            probs = probs / probs.sum()
+            label_idx = int(np.argmax(probs))
             label = LABEL_MAP[label_idx]
+            entailment_prob = float(probs[1])
+            contradiction_prob = float(probs[0])
         else:
             # Binary: positive = entailment
             label = "entailment" if float(score) > 0.5 else "contradiction"
-            confidence = abs(float(score))
+            entailment_prob = float(score)
+            contradiction_prob = 1.0 - entailment_prob
 
-        is_stripped = label in ("contradiction", "neutral") and confidence > threshold
+        # Strip only when contradiction is confident — neutral means uncertain, not wrong
+        is_stripped = contradiction_prob > threshold
 
         verified_claims.append({
             "text": claim_text,
             "label": label,
-            "score": round(confidence, 3),
+            "score": round(entailment_prob, 3),
             "stripped": is_stripped,
         })
 

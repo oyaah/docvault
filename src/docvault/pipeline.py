@@ -301,9 +301,16 @@ class DocVaultPipeline:
                 citations=citations, confidence=confidence, trace_id=trace.trace_id,
             )
 
+        # Collect actual section_paths from retrieved chunks for eval
+        retrieved_sections = list({
+            c.get("section_path", "") for c in context_chunks
+            if c.get("section_path") and not c.get("is_parent")
+        })
+
         return {
             "answer": answer,
             "citations": citations,
+            "retrieved_sections": retrieved_sections,
             "confidence": confidence,
             "verification": {
                 "claims_total": verification.claims_total,
