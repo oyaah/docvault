@@ -103,7 +103,7 @@ def main():
             r = pipe.query(question)
             return {
                 "answer": r["answer"],
-                "retrieved_sections": [c.get("section", "") for c in r.get("citations", [])],
+                "retrieved_sections": r.get("retrieved_sections", []),
                 "latency_ms": (time.time() - t0) * 1000,
             }
 

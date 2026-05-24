@@ -244,6 +244,12 @@ class DocumentStore:
 
     def bm25_search(self, query: str, top_k: int = 50) -> list[dict]:
         """BM25 search via FTS5. Returns chunks with bm25 rank scores."""
+        import re
+        tokens = re.findall(r'\w+', query)
+        if not tokens:
+            return []
+        # Use OR so chunks matching any token are returned (BM25 ranks by relevance)
+        fts_query = " OR ".join(f'"{t}"' for t in tokens)
         with self._conn() as conn:
             rows = conn.execute(
                 """SELECT c.*, bm25(chunks_fts) AS score
@@ -253,7 +259,7 @@ class DocumentStore:
                    WHERE chunks_fts MATCH ? AND d.status = 'active'
                    ORDER BY score
                    LIMIT ?""",
-                (query, top_k),
+                (fts_query, top_k),
             ).fetchall()
             return [dict(r) for r in rows]
 
