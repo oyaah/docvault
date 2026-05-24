@@ -173,8 +173,8 @@ docker compose up
 
 | Metric | Score |
 |--------|-------|
-| Retrieval Recall@10 | 53.3% |
-| Answer Accuracy | 46.7% |
+| Retrieval Recall@10 | 85.3% |
+| Answer Accuracy | 76.7% |
 | NLI Verification | 5/5 claims verified on sample queries |
 
 Evaluated on a 15-query golden dataset covering 10 HR policy documents.
