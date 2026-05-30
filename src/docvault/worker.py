@@ -95,39 +95,36 @@ def ingest_directory_task(self, dir_path: str, version: str = "1.0",
 
 @app.task(name="docvault.worker.quality_check")
 def quality_check_task(ingest_result: dict | list) -> dict:
-    """Post-ingestion quality check — runs eval on recently ingested documents.
+    """Post-ingestion quality check — LLM-as-judge eval on a sample question set.
 
     Part of the agentic pipeline chain: ingest → quality_check → drift_check.
-    Receives ingest result from upstream task via Celery chain.
+    Receives ingest result from upstream task via Celery chain. Marks "degraded"
+    if faithfulness drops or refusal-on-unanswerable slips.
     """
-    import time
-    from docvault.ragops.evaluator import run_eval_suite, save_eval_results
+    from docvault.ragops.judge_eval import run_judge_eval
 
-    logger.info("[worker] Running post-ingest quality check")
-    pipe = _get_pipeline()
+    logger.info("[worker] Running post-ingest quality check (LLM-as-judge)")
+    agg = run_judge_eval(pipe=_get_pipeline(), sample=settings.eval_sample_size)
 
-    def query_fn(question: str) -> dict:
-        t0 = time.time()
-        r = pipe.query(question)
-        return {
-            "answer": r["answer"],
-            "retrieved_sections": r.get("retrieved_sections", []),
-            "latency_ms": (time.time() - t0) * 1000,
-        }
+    if agg.get("status") != "ok":
+        logger.warning("[worker] Quality check skipped: no benchmark question set found")
+        return {"status": "skipped", "reason": "no_questions", "ingest_result": ingest_result}
 
-    result = run_eval_suite(query_fn)
-    save_eval_results(result)
+    faithfulness = agg["overall"].get("faithfulness", {}).get("mean")
+    refusal = agg.get("refusal_correctness_unanswerable")
+    degraded = (faithfulness is not None and faithfulness < 0.85) or (refusal is not None and refusal < 0.7)
+    status = "degraded" if degraded else "pass"
 
-    status = "pass" if result.avg_retrieval_recall >= 0.5 else "degraded"
     logger.info(
         f"[worker] Quality check: {status} "
-        f"(recall={result.avg_retrieval_recall:.3f}, accuracy={result.answer_accuracy:.3f})"
+        f"(faithfulness={faithfulness}, hallucination={agg.get('hallucination_rate')}, refusal={refusal})"
     )
-
     return {
         "status": status,
-        "recall": result.avg_retrieval_recall,
-        "accuracy": result.answer_accuracy,
+        "faithfulness": faithfulness,
+        "hallucination_rate": agg.get("hallucination_rate"),
+        "refusal_correctness_unanswerable": refusal,
+        "n": agg.get("n"),
         "ingest_result": ingest_result,
     }
 
@@ -201,34 +198,25 @@ def ingest_with_pipeline(file_path: str, **kwargs) -> chain:
 
 @app.task(name="docvault.worker.run_eval_suite_task")
 def run_eval_suite_task() -> dict:
-    """Scheduled eval suite execution (nightly)."""
-    import time
-    from docvault.ragops.evaluator import run_eval_suite, save_eval_results
+    """Scheduled LLM-as-judge eval (nightly). Persists the aggregate report so
+    GET /api/eval/results serves it."""
+    import json
+    from docvault.ragops.judge_eval import run_judge_eval
 
-    logger.info("[worker] Running scheduled eval suite")
-    pipe = _get_pipeline()
+    logger.info("[worker] Running scheduled LLM-as-judge eval")
+    agg = run_judge_eval(pipe=_get_pipeline(), sample=settings.eval_sample_size)
 
-    def query_fn(question: str) -> dict:
-        t0 = time.time()
-        r = pipe.query(question)
-        return {
-            "answer": r["answer"],
-            "retrieved_sections": r.get("retrieved_sections", []),
-            "latency_ms": (time.time() - t0) * 1000,
-        }
+    if agg.get("status") != "ok":
+        logger.warning("[worker] Scheduled eval skipped: no benchmark question set")
+        return agg
 
-    result = run_eval_suite(query_fn)
-    save_eval_results(result)
-
+    (settings.data_dir / "eval_results.json").write_text(json.dumps(agg, indent=2))
     logger.info(
-        f"[worker] Eval complete: recall={result.avg_retrieval_recall:.3f}, "
-        f"accuracy={result.answer_accuracy:.3f}"
+        f"[worker] Eval complete: n={agg['n']}, faithfulness="
+        f"{agg['overall'].get('faithfulness', {}).get('mean')}, "
+        f"hallucination={agg.get('hallucination_rate')}"
     )
-    return {
-        "total_queries": result.total_queries,
-        "avg_retrieval_recall": result.avg_retrieval_recall,
-        "answer_accuracy": result.answer_accuracy,
-    }
+    return agg
 
 
 @app.task(name="docvault.worker.cleanup_sessions")

@@ -11,8 +11,8 @@ from pydantic import BaseModel
 
 from docvault.config import settings
 from docvault.pipeline import DocVaultPipeline
+from docvault.auth import APIKeyMiddleware
 from docvault.ragops.metrics import get_metrics_text
-from docvault.ragops.evaluator import run_eval_suite, save_eval_results, load_golden_dataset
 from docvault.ragops.drift import generate_drift_report
 from docvault.ragops.tracer import load_traces
 from docvault.observability import configure_logging, configure_telemetry
@@ -59,8 +59,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# API key auth (disabled if no keys configured)
-from docvault.auth import APIKeyMiddleware
+# API key auth (fail-closed unless DOCVAULT_REQUIRE_AUTH=false)
 app.add_middleware(APIKeyMiddleware)
 
 
@@ -128,7 +127,7 @@ async def ingest(req: IngestRequest):
     # Async mode: dispatch to Celery worker with agentic pipeline chain
     if req.async_mode:
         try:
-            from docvault.worker import ingest_with_pipeline, ingest_file_task, ingest_directory_task
+            from docvault.worker import ingest_with_pipeline, ingest_directory_task
 
             if source.is_dir():
                 task = ingest_directory_task.delay(
@@ -223,32 +222,20 @@ async def metrics_endpoint():
 
 
 @app.post("/api/eval/run")
-async def run_eval():
+async def run_eval(sample: int | None = None):
     if not pipeline:
         raise HTTPException(503, "Pipeline not initialized")
 
-    golden = load_golden_dataset()
-    if not golden:
-        return {"error": "No golden dataset found at eval/golden_dataset.json"}
+    from docvault.ragops.judge_eval import run_judge_eval
+    import json
 
-    def query_fn(question: str) -> dict:
-        t0 = time.time()
-        result = pipeline.query(question)
-        return {
-            "answer": result["answer"],
-            "retrieved_sections": result.get("retrieved_sections", []),
-            "latency_ms": (time.time() - t0) * 1000,
-        }
+    agg = run_judge_eval(pipe=pipeline, sample=sample or settings.eval_sample_size)
+    if agg.get("status") != "ok":
+        return {"error": f"No benchmark question set at {settings.benchmark_questions_path}. "
+                         "Generate it with benchmark/generate_dataset.py."}
 
-    suite_result = run_eval_suite(query_fn)
-    save_eval_results(suite_result)
-
-    return {
-        "total_queries": suite_result.total_queries,
-        "avg_retrieval_recall": suite_result.avg_retrieval_recall,
-        "avg_latency_ms": suite_result.avg_latency_ms,
-        "answer_accuracy": suite_result.answer_accuracy,
-    }
+    (settings.data_dir / "eval_results.json").write_text(json.dumps(agg, indent=2))
+    return agg
 
 
 @app.get("/api/eval/results")

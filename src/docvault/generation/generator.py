@@ -1,6 +1,5 @@
 """LLM generation with constrained prompting and citation extraction."""
 
-import json
 import litellm
 
 from docvault.config import settings

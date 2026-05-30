@@ -12,6 +12,10 @@ class Settings(BaseSettings):
 
     # LLM
     llm_model: str = "gpt-4o-mini"
+    # Evaluation (LLM-as-judge benchmark) — used by scheduled Celery eval tasks.
+    judge_model: str = "gpt-4o"  # cross-family judge, != llm_model (avoids self-grading)
+    benchmark_questions_path: Path = Path("./benchmark/data/questions.jsonl")
+    eval_sample_size: int = 25  # questions to judge per scheduled run (cost control)
 
     # Embedding backend: "openai" (cloud API) or "local" (sentence-transformers)
     embedding_backend: str = "openai"

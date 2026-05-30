@@ -22,7 +22,7 @@ import xxhash
 import tiktoken
 
 from docvault.config import settings
-from docvault.ingest.parser import ParsedDocument, Section
+from docvault.ingest.parser import ParsedDocument
 
 
 _encoder = None

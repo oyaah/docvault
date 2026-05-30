@@ -10,7 +10,6 @@ Export with: python scripts/export_onnx.py
 import re
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort

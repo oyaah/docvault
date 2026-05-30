@@ -1,7 +1,6 @@
 """Drift detection — embedding distribution, retrieval quality, semantic topic clustering."""
 
 import time
-import logging
 from collections import Counter
 from pathlib import Path
 from dataclasses import dataclass, field

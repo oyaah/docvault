@@ -3,7 +3,6 @@
 import json
 import time
 import uuid
-from pathlib import Path
 from dataclasses import dataclass, field, asdict
 
 from docvault.config import settings

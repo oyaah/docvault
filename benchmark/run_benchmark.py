@@ -2,7 +2,7 @@
 report metrics with bootstrap confidence intervals and pass/fail gates.
 
 Does NOT use exact-match. Retrieval + generation + behaviour are all scored by
-an LLM judge (see judges.py). Results are written incrementally so --resume can
+an LLM judge (docvault.ragops.judges). Results are written incrementally so --resume can
 continue an interrupted run.
 
 Usage:
@@ -13,8 +13,6 @@ Usage:
 
 import argparse
 import json
-import statistics
-import time
 import warnings
 from pathlib import Path
 
@@ -22,109 +20,11 @@ from pathlib import Path
 # field" UserWarnings — silence them so run output stays readable.
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.main")
 
-import numpy as np
-
 from docvault.config import settings
 from docvault.pipeline import DocVaultPipeline
-
-import judges
-
-GROUNDED = {"factoid", "multi_hop", "comparative", "paraphrase", "table_lookup"}
-
-
-def evaluate_one(q: dict, pipe: DocVaultPipeline, judge_model: str) -> dict:
-    t0 = time.time()
-    res = pipe.query(q["question"])
-    latency_ms = (time.time() - t0) * 1000
-
-    answer = res.get("answer", "")
-    contexts = res.get("contexts", [])
-    answerable = q.get("answerable", True)
-
-    raw: dict[str, float | None] = {}
-    raw["refusal_correctness"] = judges.judge_refusal_correctness(answer, answerable)["score"]
-
-    refused = judges.is_refusal(answer)
-
-    if answerable:
-        raw["context_precision"] = judges.judge_context_precision(q["question"], contexts, judge_model)["score"]
-        raw["context_recall"] = judges.judge_context_recall(q["reference_answer"], contexts, judge_model)["score"]
-        raw["faithfulness"] = judges.judge_faithfulness(answer, contexts, judge_model)["score"]
-        raw["answer_relevancy"] = judges.judge_answer_relevancy(q["question"], answer, judge_model)["score"]
-        raw["answer_correctness"] = judges.judge_answer_correctness(
-            q["question"], answer, q["reference_answer"], judge_model)["score"]
-        if not refused and not judges.has_citation(answer):
-            # an answerable answer that cites nothing is a citation failure (spec: cite every claim)
-            raw["citation_accuracy"] = 0.0
-        else:
-            raw["citation_accuracy"] = judges.judge_citation_accuracy(answer, contexts, judge_model)["score"]
-    elif not refused:
-        # It answered something it shouldn't have — measure how ungrounded it is.
-        raw["faithfulness"] = judges.judge_faithfulness(answer, contexts, judge_model)["score"]
-
-    # Drop None (failed/N-A judge calls) so they don't pollute aggregates.
-    scores = {k: v for k, v in raw.items() if v is not None}
-
-    return {
-        "id": q["id"],
-        "category": q["category"],
-        "answerable": answerable,
-        "question": q["question"],
-        "answer": answer,
-        "confidence": res.get("confidence"),
-        "n_contexts": len(contexts),
-        "latency_ms": round(latency_ms, 1),
-        "scores": scores,
-        "n_judge_failures": len(raw) - len(scores),
-    }
-
-
-def bootstrap_ci(values: list[float], iters: int = 2000) -> tuple[float, float]:
-    if len(values) < 2:
-        return (float("nan"), float("nan"))
-    arr = np.array(values, dtype=float)
-    means = [arr[np.random.randint(0, len(arr), len(arr))].mean() for _ in range(iters)]
-    return (round(float(np.percentile(means, 2.5)), 3), round(float(np.percentile(means, 97.5)), 3))
-
-
-def aggregate(results: list[dict]) -> dict:
-    metrics = ["context_precision", "context_recall", "faithfulness", "answer_relevancy",
-               "answer_correctness", "citation_accuracy", "refusal_correctness"]
-    overall = {}
-    for m in metrics:
-        vals = [r["scores"][m] for r in results if m in r["scores"]]
-        if vals:
-            overall[m] = {"mean": round(statistics.mean(vals), 3), "n": len(vals), "ci95": bootstrap_ci(vals)}
-
-    faith = [r["scores"]["faithfulness"] for r in results if "faithfulness" in r["scores"]]
-    hallucination_rate = round(1 - statistics.mean(faith), 3) if faith else None
-
-    refusal_unanswerable = [r["scores"]["refusal_correctness"] for r in results
-                            if not r["answerable"]]
-    by_cat: dict[str, dict] = {}
-    cats = sorted({r["category"] for r in results})
-    for cat in cats:
-        sub = [r for r in results if r["category"] == cat]
-        cat_metrics = {}
-        for m in metrics:
-            vals = [r["scores"][m] for r in sub if m in r["scores"]]
-            if vals:
-                cat_metrics[m] = round(statistics.mean(vals), 3)
-        by_cat[cat] = {"n": len(sub), **cat_metrics}
-
-    lat = [r["latency_ms"] for r in results]
-    return {
-        "n": len(results),
-        "judge_failures": sum(r.get("n_judge_failures", 0) for r in results),
-        "overall": overall,
-        "hallucination_rate": hallucination_rate,
-        "refusal_correctness_unanswerable": round(statistics.mean(refusal_unanswerable), 3) if refusal_unanswerable else None,
-        "latency_ms": {
-            "p50": round(float(np.percentile(lat, 50)), 1) if lat else None,
-            "p95": round(float(np.percentile(lat, 95)), 1) if lat else None,
-        },
-        "by_category": by_cat,
-    }
+# Eval core lives in the package so the Celery worker can reuse it too.
+from docvault.ragops import judges
+from docvault.ragops.judge_eval import evaluate_one, aggregate
 
 
 def check_gates(agg: dict, args) -> list[tuple[str, bool, str]]:

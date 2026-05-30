@@ -1,8 +1,6 @@
 """CLI for DocVault — ingest, query, eval, serve."""
 
 import argparse
-import json
-import sys
 import logging
 from pathlib import Path
 

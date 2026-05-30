@@ -1,9 +1,7 @@
 """Core pipeline — orchestrates ingest and query flows."""
 
 import time
-import logging
 
-import numpy as np
 
 from docvault.config import settings
 from docvault.storage.documents import DocumentStore
@@ -17,7 +15,7 @@ from docvault.generation.generator import generate_answer, expand_query
 from docvault.generation.verifier import verify_answer
 from docvault.memory.session import SessionStore
 from docvault.memory.cache import RetrievalCache
-from docvault.ragops.tracer import QueryTrace, RetrievalTrace, GenerationTrace, VerificationTrace
+from docvault.ragops.tracer import QueryTrace, GenerationTrace, VerificationTrace
 from docvault.ragops.drift import compute_embedding_drift
 from docvault.ragops import metrics
 
