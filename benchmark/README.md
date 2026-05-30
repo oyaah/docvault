@@ -104,6 +104,7 @@ regenerated set will be cleaner.
   - chunking: `DOCVAULT_ENABLE_PARENT_CHUNKS=false`, `DOCVAULT_BREADCRUMB_PREFIX=false`,
     `DOCVAULT_CHUNK_SIZE=...`
   - gating: `DOCVAULT_CONFIDENCE_THRESHOLD=...`
-- The legacy `docvault eval` (substring match over `eval/golden_dataset.json`) is
-  superseded by this harness and kept only for reference.
+- This harness fully replaces the old substring-matching golden eval, which has
+  been removed. The same eval core (`docvault.ragops.judge_eval`) also powers the
+  scheduled Celery quality checks and `POST /api/eval/run`.
 ```

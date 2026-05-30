@@ -1,4 +1,4 @@
-"""CLI for DocVault — ingest, query, eval, serve."""
+"""CLI for DocVault — ingest, query, stats, serve."""
 
 import argparse
 import logging
@@ -27,10 +27,6 @@ def main():
     query_p = sub.add_parser("query", help="Query the pipeline")
     query_p.add_argument("question", help="Question to ask")
     query_p.add_argument("--session-id", default=None)
-
-    # eval
-    eval_p = sub.add_parser("eval", help="Run evaluation suite")
-    eval_p.add_argument("--golden", default="eval/golden_dataset.json")
 
     # stats
     sub.add_parser("stats", help="Show pipeline stats")
@@ -86,32 +82,6 @@ def main():
             v = result["verification"]
             print(f"\nVerification: {v['claims_verified']}/{v['claims_total']} claims verified"
                   f" ({v['claims_stripped']} stripped)")
-
-    elif args.command == "eval":
-        from docvault.pipeline import DocVaultPipeline
-        from docvault.ragops.evaluator import run_eval_suite, save_eval_results
-        from docvault.config import settings
-        import time
-
-        settings.ensure_dirs()
-        pipe = DocVaultPipeline()
-
-        def query_fn(question):
-            t0 = time.time()
-            r = pipe.query(question)
-            return {
-                "answer": r["answer"],
-                "retrieved_sections": r.get("retrieved_sections", []),
-                "latency_ms": (time.time() - t0) * 1000,
-            }
-
-        result = run_eval_suite(query_fn, Path(args.golden))
-        save_eval_results(result)
-
-        print(f"Eval complete: {result.total_queries} queries")
-        print(f"  Retrieval Recall@10: {result.avg_retrieval_recall:.4f}")
-        print(f"  Answer Accuracy:     {result.answer_accuracy:.4f}")
-        print(f"  Avg Latency:         {result.avg_latency_ms:.0f}ms")
 
     elif args.command == "stats":
         from docvault.storage.documents import DocumentStore
