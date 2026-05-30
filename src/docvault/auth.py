@@ -5,8 +5,9 @@ import secrets
 import logging
 from pathlib import Path
 
-from fastapi import Request, HTTPException
+from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 from docvault.config import settings
 
@@ -53,32 +54,37 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         self._keys = _load_api_keys()
         if self._keys:
             logger.info(f"API auth enabled: {len(self._keys)} key(s) loaded")
+        elif settings.require_auth:
+            # Fail closed: no keys + auth required -> reject all protected traffic.
+            logger.error(
+                "API auth REQUIRED but no keys configured — all protected endpoints "
+                "will return 503. Set DOCVAULT_API_KEYS, create data/api_keys.txt, "
+                "or set DOCVAULT_REQUIRE_AUTH=false for local dev."
+            )
         else:
-            logger.warning("API auth disabled: no keys configured. Set DOCVAULT_API_KEYS or create data/api_keys.txt")
+            logger.warning("API auth disabled (DOCVAULT_REQUIRE_AUTH=false) — open access.")
 
     async def dispatch(self, request: Request, call_next):
-        # Skip auth for public endpoints
+        # Public endpoints never require auth.
         if request.url.path in PUBLIC_PATHS:
             return await call_next(request)
 
-        # Skip if no keys configured (dev mode)
         if not self._keys:
-            return await call_next(request)
+            if settings.require_auth:
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "Server misconfigured: no API keys configured and auth is required."},
+                )
+            return await call_next(request)  # explicit dev-mode open access
 
-        # Check Authorization: Bearer <key>
         auth_header = request.headers.get("Authorization", "")
         api_key_header = request.headers.get("X-API-Key", "")
-
-        key = None
-        if auth_header.startswith("Bearer "):
-            key = auth_header[7:]
-        elif api_key_header:
-            key = api_key_header
+        key = auth_header[7:] if auth_header.startswith("Bearer ") else api_key_header
 
         if not key or key not in self._keys:
-            raise HTTPException(
+            return JSONResponse(
                 status_code=401,
-                detail="Invalid or missing API key. Provide via Authorization: Bearer <key> or X-API-Key header.",
+                content={"detail": "Invalid or missing API key. Use Authorization: Bearer <key> or X-API-Key."},
             )
 
         return await call_next(request)

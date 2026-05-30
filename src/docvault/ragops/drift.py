@@ -31,29 +31,43 @@ def compute_embedding_drift(
     new_embeddings: np.ndarray,
     baseline_path: Path | None = None,
 ) -> float | None:
-    bpath = baseline_path or (settings.data_dir / "embedding_baseline.npy")
+    """Cosine drift of a new batch's mean vs a frozen reference baseline.
+
+    The baseline is accumulated as a running mean over the first
+    `drift_baseline_min_samples` chunks, then frozen — so it reflects the initial
+    corpus distribution rather than whatever single document was ingested first.
+    Returns None while the baseline is still warming up.
+    """
+    bpath = baseline_path or (settings.data_dir / "embedding_baseline.npz")
+    new_mean = np.mean(new_embeddings, axis=0)
+    n_new = len(new_embeddings)
+    min_samples = settings.drift_baseline_min_samples
 
     if not bpath.exists():
-        np.save(str(bpath), np.mean(new_embeddings, axis=0))
+        np.savez(str(bpath), mean=new_mean, count=n_new, frozen=(n_new >= min_samples))
         return None
 
-    baseline_mean = np.load(str(bpath))
-    new_mean = np.mean(new_embeddings, axis=0)
+    data = np.load(str(bpath))
+    base_mean, count, frozen = data["mean"], int(data["count"]), bool(data["frozen"])
 
-    if baseline_mean.shape != new_mean.shape:
-        np.save(str(bpath), new_mean)
+    if base_mean.shape != new_mean.shape:
+        np.savez(str(bpath), mean=new_mean, count=n_new, frozen=False)
         logger.warning("Embedding dimension changed — reset baseline")
         return None
 
-    cos_sim = np.dot(baseline_mean, new_mean) / (
-        np.linalg.norm(baseline_mean) * np.linalg.norm(new_mean) + 1e-8
-    )
-    drift = 1.0 - float(cos_sim)
+    if not frozen:
+        total = count + n_new
+        merged = (base_mean * count + new_mean * n_new) / total
+        np.savez(str(bpath), mean=merged, count=total, frozen=(total >= min_samples))
+        return None
 
+    cos_sim = float(np.dot(base_mean, new_mean) / (
+        np.linalg.norm(base_mean) * np.linalg.norm(new_mean) + 1e-8
+    ))
+    drift = round(1.0 - cos_sim, 6)
     if drift > settings.embedding_drift_threshold:
         logger.warning(f"Embedding drift detected: {drift:.6f}")
-
-    return round(drift, 6)
+    return drift
 
 
 def compute_retrieval_quality_trend(days: int = 7) -> float | None:

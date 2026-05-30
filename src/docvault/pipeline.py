@@ -28,6 +28,15 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 
+def _chunk_role(chunk: dict) -> str:
+    """Read the role ('leaf'|'parent') from a chunk's metadata JSON."""
+    import json
+    try:
+        return json.loads(chunk.get("metadata") or "{}").get("role", "leaf")
+    except (ValueError, TypeError):
+        return "leaf"
+
+
 class DocVaultPipeline:
     def __init__(self, store: DocumentStore | None = None):
         self.store = store or DocumentStore()
@@ -63,9 +72,16 @@ class DocVaultPipeline:
         if not chunks:
             return {"document_id": doc.id, "chunks": 0, "time_ms": 0}
 
-        # Embed
-        texts = [c["content"] for c in chunks]
-        hashes = [c["chunk_hash"] for c in chunks]
+        # Store chunks in SQLite (with parent linking)
+        self.store.add_chunks(chunks)
+
+        # Only leaf chunks are embedded + indexed; parents are fetched for context.
+        db_chunks = self.store.get_chunks_by_document(doc.id)
+        leaves = [c for c in db_chunks if _chunk_role(c) != "parent"]
+
+        # Embed leaves (hash-cached: unchanged chunks are not re-embedded)
+        texts = [c["content"] for c in leaves]
+        hashes = [c["chunk_hash"] for c in leaves]
         embeddings = embed_texts(texts, chunk_hashes=hashes)
 
         # Embedding drift detection
@@ -73,18 +89,12 @@ class DocVaultPipeline:
         if drift is not None:
             logger.info(f"Embedding drift: {drift:.6f}")
 
-        # Store chunks in SQLite (with parent linking)
-        chunk_ids = self.store.add_chunks(chunks)
-
-        # Get chunk IDs from DB for dense index
-        db_chunks = self.store.get_chunks_by_document(doc.id)
-        db_chunk_ids = [c["id"] for c in db_chunks]
+        # Index leaves in the dense store
+        db_chunk_ids = [c["id"] for c in leaves]
         chunk_meta = [
             {"document_id": doc.id, "section_path": c["section_path"]}
-            for c in db_chunks
+            for c in leaves
         ]
-
-        # Index in LanceDB
         dense.index_chunks(db_chunk_ids, embeddings, metadata=chunk_meta)
 
         # Invalidate retrieval cache
@@ -130,6 +140,24 @@ class DocVaultPipeline:
                     results.append({"file": str(fp), "error": str(e)})
 
         return results
+
+    def retrieve_scores(self, question: str) -> float:
+        """Run retrieval + rerank only and return the top reranker score.
+
+        No generation, no LLM call — used to calibrate the confidence gate
+        (see benchmark/calibrate_gate.py) cheaply over many questions.
+        """
+        query_emb = embed_query(question)
+        dense_results = dense.search(query_emb, top_k=settings.dense_top_k)
+        sparse_results = sparse.search(question, self.store, top_k=settings.sparse_top_k)
+        for r in dense_results:
+            chunk = self.store.get_chunk_by_id(r["chunk_id"])
+            if chunk:
+                r["content"] = chunk["content"]
+        dense_results = [r for r in dense_results if "content" in r]
+        fused = reciprocal_rank_fusion(dense_results, sparse_results)
+        reranked = rerank(question, fused, top_k=settings.rerank_top_k)
+        return reranked[0]["rerank_score"] if reranked else float("-inf")
 
     # ── Query ───────────────────────────────────────────────
 
@@ -221,6 +249,8 @@ class DocVaultPipeline:
             return {
                 "answer": no_answer,
                 "citations": [],
+                "retrieved_sections": [],
+                "contexts": [],
                 "confidence": "low",
                 "trace_id": trace.trace_id,
             }
@@ -280,11 +310,14 @@ class DocVaultPipeline:
             metrics.NLI_SCORES.observe(score)
 
         if verification.claims_total > 0:
-            rate = verification.claims_stripped / verification.claims_total
-            metrics.HALLUCINATION_RATE.set(rate)
+            metrics.CLAIMS_TOTAL.inc(verification.claims_total)
+            metrics.CLAIMS_STRIPPED.inc(verification.claims_stripped)
+            metrics.HALLUCINATION_RATE.set(  # deprecated per-query gauge
+                verification.claims_stripped / verification.claims_total
+            )
 
         # ── Final response ──
-        confidence = "high" if top_score > 5.0 else "medium"
+        confidence = "high" if top_score > settings.confidence_high_threshold else "medium"
         trace.confidence = confidence
         trace.total_latency_ms = (time.time() - t_total) * 1000
         trace.save()
@@ -309,11 +342,23 @@ class DocVaultPipeline:
             if c.get("section_path") and not c.get("is_parent")
         })
 
+        # Assembled context used for generation — exposed for evaluation/judging.
+        contexts = [
+            {
+                "section_path": c.get("section_path", ""),
+                "content": c.get("content", ""),
+                "is_parent": bool(c.get("is_parent")),
+            }
+            for c in context_chunks
+        ]
+
         return {
             "answer": answer,
             "citations": citations,
             "retrieved_sections": retrieved_sections,
+            "contexts": contexts,
             "confidence": confidence,
+            "top_score": top_score,
             "verification": {
                 "claims_total": verification.claims_total,
                 "claims_verified": verification.claims_verified,

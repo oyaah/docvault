@@ -35,6 +35,7 @@ def generate_answer(
         ],
         temperature=0.1,  # low temp for factual answers
         max_tokens=1024,
+        num_retries=4,  # ride out transient API/TLS errors
     )
 
     answer = response.choices[0].message.content

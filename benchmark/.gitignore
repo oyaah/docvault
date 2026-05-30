@@ -1,0 +1,3 @@
+# Downloaded corpus and generated artifacts are reproducible — don't commit them.
+corpus/
+data/

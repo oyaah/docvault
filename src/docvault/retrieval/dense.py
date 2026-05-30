@@ -1,119 +1,41 @@
-"""Dense retrieval via Pinecone managed vector DB.
+"""Dense retrieval dispatcher.
 
-Replaces local LanceDB — data persists across container restarts,
-supports horizontal scaling, and requires zero infrastructure management.
+Selects the backend from settings.dense_backend:
+  - "pinecone" (default): managed serverless ANN (dense_pinecone)
+  - "local": offline brute-force NumPy cosine (dense_local)
 
-Free tier: 1 index, 100K vectors — sufficient for company policy docs.
+Keeping this as a thin dispatcher lets the rest of the pipeline import
+`from docvault.retrieval import dense` and call dense.search / dense.index_chunks
+without caring which backend is active — and lets tests / offline dev run with
+no Pinecone account.
 """
-
-import logging
-
-from pinecone import Pinecone, ServerlessSpec
-import numpy as np
 
 from docvault.config import settings
 
-logger = logging.getLogger(__name__)
 
-_index = None
-
-
-def _get_index():
-    global _index
-    if _index is None:
-        pc = Pinecone(api_key=settings.pinecone_api_key)
-
-        # Create index if it doesn't exist
-        existing = [idx.name for idx in pc.list_indexes()]
-        if settings.pinecone_index_name not in existing:
-            pc.create_index(
-                name=settings.pinecone_index_name,
-                dimension=settings.embedding_dimensions,
-                metric="cosine",
-                spec=ServerlessSpec(
-                    cloud=settings.pinecone_cloud,
-                    region=settings.pinecone_region,
-                ),
-            )
-            logger.info(f"Created Pinecone index: {settings.pinecone_index_name}")
-
-        _index = pc.Index(settings.pinecone_index_name)
-    return _index
+def _backend():
+    if settings.dense_backend == "local":
+        from docvault.retrieval import dense_local
+        return dense_local
+    from docvault.retrieval import dense_pinecone
+    return dense_pinecone
 
 
-def index_chunks(
-    chunk_ids: list[str],
-    embeddings: np.ndarray,
-    metadata: list[dict] | None = None,
-):
-    """Upsert chunk vectors into Pinecone."""
-    index = _get_index()
-
-    vectors = []
-    for i, chunk_id in enumerate(chunk_ids):
-        meta = {}
-        if metadata:
-            meta["document_id"] = metadata[i].get("document_id", "")
-            meta["section_path"] = metadata[i].get("section_path", "")
-        vectors.append({
-            "id": chunk_id,
-            "values": embeddings[i].tolist(),
-            "metadata": meta,
-        })
-
-    # Pinecone upsert in batches of 100
-    batch_size = 100
-    for i in range(0, len(vectors), batch_size):
-        batch = vectors[i : i + batch_size]
-        index.upsert(vectors=batch)
-
-    logger.info(f"Indexed {len(vectors)} chunks in Pinecone")
+def index_chunks(chunk_ids, embeddings, metadata=None):
+    return _backend().index_chunks(chunk_ids, embeddings, metadata=metadata)
 
 
-def search(query_embedding: np.ndarray, top_k: int | None = None) -> list[dict]:
-    """ANN search. Returns list of {chunk_id, score, document_id, section_path}."""
-    index = _get_index()
-    k = top_k or settings.dense_top_k
-
-    results = index.query(
-        vector=query_embedding.tolist(),
-        top_k=k,
-        include_metadata=True,
-    )
-
-    return [
-        {
-            "chunk_id": match.id,
-            "score": match.score,  # cosine similarity [0, 1]
-            "document_id": match.metadata.get("document_id", ""),
-            "section_path": match.metadata.get("section_path", ""),
-        }
-        for match in results.matches
-    ]
+def search(query_embedding, top_k=None):
+    return _backend().search(query_embedding, top_k=top_k)
 
 
-def delete_by_document(document_id: str):
-    """Remove all vectors for a document."""
-    index = _get_index()
-    # Pinecone requires listing IDs by metadata filter, then deleting
-    # For serverless indexes, use delete with filter
-    try:
-        index.delete(filter={"document_id": {"$eq": document_id}})
-    except Exception as e:
-        logger.warning(f"Failed to delete vectors for {document_id}: {e}")
+def delete_by_document(document_id):
+    return _backend().delete_by_document(document_id)
 
 
 def reset():
-    """Delete all vectors in the index."""
-    index = _get_index()
-    try:
-        index.delete(delete_all=True)
-    except Exception:
-        pass
+    return _backend().reset()
 
 
 def warmup():
-    """Validate Pinecone connectivity."""
-    index = _get_index()
-    stats = index.describe_index_stats()
-    logger.info(f"Pinecone connected: {stats.total_vector_count} vectors")
+    return _backend().warmup()

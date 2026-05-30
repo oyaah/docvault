@@ -28,14 +28,39 @@ def test_parse_and_chunk_markdown():
 
 
 def test_chunk_sizes_within_budget():
-    """All chunks should be within the configured token budget."""
+    """Leaf (retrievable) chunks stay within budget; parents may be larger by design.
+
+    Atomic table blocks are exempt — a table is never split mid-row.
+    """
     doc = parse_file(SAMPLE_DIR / "employee-handbook.md")
     chunks = chunk_document(doc, "test-doc-id")
 
     for chunk in chunks:
+        if _role(chunk) == "parent":
+            continue
+        if "|" in chunk["content"]:  # atomic table block
+            continue
         tokens = count_tokens(chunk["content"])
-        # Allow small overflow from tokenization edge cases
-        assert tokens <= 500, f"Chunk too large: {tokens} tokens in {chunk['section_path']}"
+        # 400 budget + breadcrumb + tokenization slack
+        assert tokens <= 500, f"Leaf too large: {tokens} tokens in {chunk['section_path']}"
+
+
+def _role(chunk):
+    import json
+    return json.loads(chunk["metadata"]).get("role", "leaf")
+
+
+def test_parent_chunks_built_and_linked():
+    """Multi-leaf sections produce a parent chunk that children point to."""
+    doc = parse_file(SAMPLE_DIR / "employee-handbook.md")
+    chunks = chunk_document(doc, "test-doc-id")
+
+    parents = [c for c in chunks if _role(c) == "parent"]
+    linked = [c for c in chunks if c.get("_parent_index") is not None]
+    assert parents, "expected at least one parent chunk"
+    assert linked, "expected at least one child linked to a parent"
+    for c in linked:
+        assert _role(chunks[c["_parent_index"]]) == "parent"
 
 
 def test_section_paths_populated():

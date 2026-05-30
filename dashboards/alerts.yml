@@ -1,9 +1,12 @@
 groups:
   - name: docvault_alerts
     rules:
-      # Hallucination rate exceeds 5% over 1 hour
+      # Hallucination rate exceeds 5% over 1 hour — windowed rate from counters,
+      # not the deprecated last-value gauge.
       - alert: HighHallucinationRate
-        expr: docvault_hallucination_rate > 0.05
+        expr: >
+          rate(docvault_claims_stripped_total[1h])
+          / clamp_min(rate(docvault_claims_total[1h]), 1e-9) > 0.05
         for: 1h
         labels:
           severity: critical
@@ -14,29 +17,31 @@ groups:
             Claims are being stripped from responses at an elevated rate.
             Investigate retrieval quality and source document coverage.
 
-      # P95 query latency exceeds 500ms
+      # End-to-end latency is LLM-generation dominated (measured p50≈6s, p95≈15s).
+      # SLOs are set against that reality, not a sub-second fantasy. To alert on
+      # the parts DocVault actually controls, gate on stage="retrieval" instead.
       - alert: HighQueryLatency
-        expr: histogram_quantile(0.95, rate(docvault_query_latency_seconds_bucket{stage="total"}[5m])) > 0.5
+        expr: histogram_quantile(0.95, rate(docvault_query_latency_seconds_bucket{stage="total"}[5m])) > 18
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: "P95 query latency is {{ $value }}s"
           description: >
-            DocVault P95 query latency exceeds 500ms. Check retrieval
-            performance, reranker load, or LLM response times.
+            DocVault P95 end-to-end latency exceeds 18s. Check LLM provider
+            latency, query-expansion overhead, and reranker load.
 
-      # P99 query latency exceeds 2s
-      - alert: CriticalQueryLatency
-        expr: histogram_quantile(0.99, rate(docvault_query_latency_seconds_bucket{stage="total"}[5m])) > 2.0
+      # Retrieval-only latency (excludes the LLM) — this is the part we own.
+      - alert: HighRetrievalLatency
+        expr: histogram_quantile(0.95, rate(docvault_query_latency_seconds_bucket{stage="retrieval"}[5m])) > 1.0
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "P99 query latency is {{ $value }}s"
+          summary: "P95 retrieval latency is {{ $value }}s"
           description: >
-            DocVault P99 latency exceeds 2 seconds. Likely LLM timeout
-            or embedding model bottleneck.
+            Retrieval (embed + dense + BM25 + rerank) P95 exceeds 1s — a real
+            regression in the part of the pipeline we control.
 
       # Low retrieval confidence (too many "I don't know" responses)
       - alert: LowRetrievalConfidence

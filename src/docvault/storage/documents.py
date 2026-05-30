@@ -251,17 +251,36 @@ class DocumentStore:
         # Use OR so chunks matching any token are returned (BM25 ranks by relevance)
         fts_query = " OR ".join(f'"{t}"' for t in tokens)
         with self._conn() as conn:
+            # Parent (context) chunks are excluded — only leaf chunks are retrievable.
             rows = conn.execute(
                 """SELECT c.*, bm25(chunks_fts) AS score
                    FROM chunks_fts
                    JOIN chunks c ON chunks_fts.rowid = c.rowid
                    JOIN documents d ON c.document_id = d.id
                    WHERE chunks_fts MATCH ? AND d.status = 'active'
+                     AND COALESCE(json_extract(c.metadata, '$.role'), 'leaf') != 'parent'
                    ORDER BY score
                    LIMIT ?""",
                 (fts_query, top_k),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def get_active_leaf_chunks(self, limit: int | None = None) -> list[dict]:
+        """Return retrievable (non-parent) chunks from active documents.
+
+        Used by the benchmark dataset generator to ground synthetic questions.
+        """
+        sql = (
+            """SELECT c.*, d.title AS doc_title, d.version AS doc_version
+               FROM chunks c JOIN documents d ON c.document_id = d.id
+               WHERE d.status = 'active'
+                 AND COALESCE(json_extract(c.metadata, '$.role'), 'leaf') != 'parent'
+               ORDER BY c.document_id, c.chunk_index"""
+        )
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        with self._conn() as conn:
+            return [dict(r) for r in conn.execute(sql).fetchall()]
 
     def stats(self) -> dict:
         with self._conn() as conn:

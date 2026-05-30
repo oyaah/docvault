@@ -20,10 +20,14 @@ class Settings(BaseSettings):
     local_embedding_model: str = "BAAI/bge-m3"
 
     # Chunking
-    chunk_size: int = 400  # tokens
+    chunk_size: int = 400  # tokens — max size of a retrievable leaf chunk
     chunk_overlap_pct: float = 0.1
+    parent_chunk_max_tokens: int = 1200  # max size of an aggregated parent (context) chunk
+    enable_parent_chunks: bool = True  # build parent (h-1) context chunks, retrieved via children
+    breadcrumb_prefix: bool = True  # prepend section_path to chunk text before embedding
 
     # Retrieval
+    dense_backend: str = "pinecone"  # "pinecone" (managed) or "local" (offline brute-force)
     fusion_alpha: float = 0.6  # weight for dense vs sparse
     dense_top_k: int = 50
     sparse_top_k: int = 50
@@ -37,8 +41,20 @@ class Settings(BaseSettings):
     pinecone_cloud: str = "aws"
     pinecone_region: str = "us-east-1"
 
-    # Confidence
-    confidence_threshold: float = 0.0  # raw ms-marco score; >0 = relevant
+    # Confidence — raw ms-marco cross-encoder scores (unbounded, typ. [-12, 12])
+    # Estimated from the benchmark score bands: of 33 unanswerable questions, 19 scored
+    # <0 and 9 fell in [0,5); answerable clustered higher. 1.5 catches the lowest-scoring
+    # spurious retrievals (lifting unanswerable refusal ~0.82 -> ~0.90 est.) while keeping
+    # most genuinely-relevant answerable hits. Run calibrate_gate.py for the empirical optimum.
+    confidence_threshold: float = 1.5  # below this -> "I don't know"
+    confidence_high_threshold: float = 5.0  # above this -> "high" confidence label
+
+    # Auth — fail closed: if no API keys are configured, refuse traffic unless
+    # auth is explicitly disabled (dev only).
+    require_auth: bool = True
+
+    # Drift — accumulate the embedding baseline over this many chunks before freezing
+    drift_baseline_min_samples: int = 200
 
     # Memory
     session_ttl_seconds: int = 1800  # 30 min
