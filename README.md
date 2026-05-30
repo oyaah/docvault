@@ -15,7 +15,7 @@ Python · FastAPI · Pinecone + SQLite FTS5 · OpenAI · ONNX Runtime · Celery/
 ## About it
 
 - **Hybrid retrieval that actually fuses signals** — dense (Pinecone, OpenAI embeddings) + sparse (SQLite FTS5 BM25), merged with Reciprocal Rank Fusion, then re-ranked by an ONNX cross-encoder.
-- ** hierarchical chunking** — small leaf chunks for precise retrieval, larger parent chunks fetched for context; tables kept atomic; section breadcrumbs embedded into each chunk to boost recall.
+- **Hierarchical chunking** — small leaf chunks for precise retrieval, larger parent chunks fetched for context; tables kept atomic; section breadcrumbs embedded into each chunk to boost recall.
 - **Hallucination control you can measure** — an NLI model strips claims the sources contradict; the benchmark then *measures* the residual hallucination rate (≈0.5%) rather than asserting "zero hallucination."
 - **A real evaluation harness** — LLM-as-judge with a cross-family judge model, bootstrap confidence intervals, per-category breakdowns, and pass/fail gates. This is the part most RAG demos skip.
 - **Layered memory** — three distinct tiers: *short-term* conversation memory (last 5 turns, 30-min TTL) so follow-up questions keep context, a *query→results cache* (LRU, 1-hr TTL, auto-invalidated on re-ingest) to skip repeat retrieval, and a *long-term* versioned knowledge store (SQLite + the dense index) where re-ingesting a policy supersedes the old version instead of overwriting it. All Redis-backed in production, with a transparent in-memory fallback for local dev.
