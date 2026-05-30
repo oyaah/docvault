@@ -18,7 +18,8 @@ Python · FastAPI · Pinecone + SQLite FTS5 · OpenAI · ONNX Runtime · Celery/
 - ** hierarchical chunking** — small leaf chunks for precise retrieval, larger parent chunks fetched for context; tables kept atomic; section breadcrumbs embedded into each chunk to boost recall.
 - **Hallucination control you can measure** — an NLI model strips claims the sources contradict; the benchmark then *measures* the residual hallucination rate (≈0.5%) rather than asserting "zero hallucination."
 - **A real evaluation harness** — LLM-as-judge with a cross-family judge model, bootstrap confidence intervals, per-category breakdowns, and pass/fail gates. This is the part most RAG demos skip.
-- **Production surface** — health/readiness probes, API-key auth (fail-closed), Prometheus metrics + Grafana dashboards + alert rules, async ingest via Celery, Docker Compose, and AWS ECS/CloudFormation deploy configs.
+- **Layered memory** — three distinct tiers: *short-term* conversation memory (last 5 turns, 30-min TTL) so follow-up questions keep context, a *query→results cache* (LRU, 1-hr TTL, auto-invalidated on re-ingest) to skip repeat retrieval, and a *long-term* versioned knowledge store (SQLite + the dense index) where re-ingesting a policy supersedes the old version instead of overwriting it. All Redis-backed in production, with a transparent in-memory fallback for local dev.
+- **Production surface that does real work** — async ingest runs as a Celery *task chain* (`ingest → quality-check → drift-check`) with scheduled beat jobs (nightly judge-eval, session cleanup, periodic drift reports); health/readiness probes gate traffic; API-key auth is **fail-closed**; and observability is wired end-to-end — Prometheus counters/histograms, a Grafana dashboard, and alert rules on a *windowed* hallucination rate, retrieval latency, and error rate. Ships as Docker Compose and AWS ECS/CloudFormation.
 
 ---
 
@@ -108,6 +109,9 @@ No Pinecone account? Run fully local: `export DOCVAULT_DENSE_BACKEND=local DOCVA
 | Parent/child chunking | Retrieve on precise leaves, generate from broader parent context — fixes the "isolated fragment" failure mode. |
 | ONNX for reranker + NLI | No PyTorch at runtime → container drops from ~6 GB to ~800 MB. |
 | LLM-as-judge, cross-family | Semantic scoring without brittle string matching; a different judge model avoids self-preference bias. |
+| Three memory tiers, not one | Conversation memory, retrieval cache, and the versioned knowledge store solve different problems (context vs. latency vs. durability) and shouldn't share a lifetime or TTL. |
+| Document versioning | Re-ingesting supersedes the prior version and retrieval defaults to `active` — answers can't silently come from stale policy. |
+| Celery task chain for ingest | `ingest → quality-check → drift-check` keeps the API responsive and runs eval/drift automatically on new content, mirroring an agent-style handoff. |
 | Fail-closed auth | No API keys configured ⇒ refuse traffic, not silently open. |
 | Counters for hallucination SLO | Windowed PromQL rate, not a misleading last-value gauge. |
 
@@ -123,8 +127,9 @@ No Pinecone account? Run fully local: `export DOCVAULT_DENSE_BACKEND=local DOCVA
 | Embeddings | OpenAI `text-embedding-3-small` (1536d) |
 | Reranker / NLI | `ms-marco-MiniLM-L-6-v2` / `nli-deberta-v3-small`, via ONNX Runtime |
 | Generation | `gpt-4o-mini` via LiteLLM |
-| Async / memory | Celery + Redis (sessions, retrieval cache) |
-| Observability | Prometheus + Grafana + OpenTelemetry + structlog |
+| Async tasks | Celery + Redis (ingest chain + beat-scheduled eval/cleanup/drift) |
+| Memory | Redis-backed session memory + retrieval cache; SQLite versioned document store (in-memory fallback) |
+| Observability | Prometheus (counters/histograms) + Grafana dashboard & alerts + OpenTelemetry + structlog |
 | Deploy | Docker Compose · AWS ECS Fargate + CloudFormation |
 
 ---
