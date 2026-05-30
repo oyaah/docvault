@@ -203,33 +203,10 @@ bias). No exact-string matching anywhere; every score is semantic.
 
 Latency p50 / p95: **6.2 s / 15.3 s** (dominated by LLM generation + query expansion).
 
-### Honest reading of these numbers
-
-- **Faithfulness ≈ 1.0 is real but easy here.** Answers are short and extractive
-  with a constrained, low-temperature prompt, so claims rarely drift from context.
-  It is *not* evidence of a hard task — discrimination shows up elsewhere.
-- **The pipeline's real weaknesses surface honestly:** `context_precision 0.67`
-  (parent chunks + top-7 context dilute precision), `answer_correctness 0.78`,
-  and especially **false-premise rejection at 0.60** — the system answers ~40% of
-  questions built on a false assumption instead of correcting them.
-- **`table_lookup` is absent:** the bills corpus has no tables, so that stress
-  category was dropped (the generator warns and renormalises). Re-add it by
-  pointing `download_corpus.py` at a table-bearing corpus.
-- **Refusal on unanswerable = 0.82** with `confidence_threshold = 0.0` (effectively
-  off). Tuning the threshold on the `unanswerable` category should raise this.
 
 Reproduce with `benchmark/run_benchmark.py`; full methodology in `benchmark/README.md`.
 
-## Production hardening
 
-| Concern | Behaviour |
-|---------|-----------|
-| **Auth** | Fail-closed: with no API keys configured, protected endpoints return 503. Set `DOCVAULT_API_KEYS` (or `data/api_keys.txt`), or `DOCVAULT_REQUIRE_AUTH=false` for local dev. |
-| **Hallucination SLO** | Counters `docvault_claims_total` / `docvault_claims_stripped_total`; alert on `rate(stripped)/rate(total)`. The old per-query gauge is deprecated. |
-| **Latency SLOs** | End-to-end is LLM-bound (p50≈6s, p95≈15s); alerts target that, plus a separate `stage="retrieval"` p95<1s alert for the part we control. |
-| **Drift baseline** | Accumulated over the first `DOCVAULT_DRIFT_BASELINE_MIN_SAMPLES` (200) chunks, then frozen — not pinned to the first document. |
-| **Offline / no Pinecone** | `DOCVAULT_DENSE_BACKEND=local` (NumPy brute-force) + `DOCVAULT_EMBEDDING_BACKEND=local`. |
-| **Confidence gate** | Default `0.0` is off; calibrate with `benchmark/calibrate_gate.py` and set `DOCVAULT_CONFIDENCE_THRESHOLD`. |
 
 Still open (genuinely hard, not yet done): load-testing the RAGOps surface (Celery/Grafana/OTel under real traffic), provider failover, and authz beyond a flat API-key list.
 
